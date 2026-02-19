@@ -131,6 +131,7 @@ enum ObjectDispatchLayer {
 enum {
   READ_FLAG_DISABLE_READ_FROM_PARENT            = 1UL << 0,
   READ_FLAG_DISABLE_CLIPPING                    = 1UL << 1,
+  READ_FLAG_ENCRYPTED_AEAD_READ               = 1UL << 2,
 };
 
 // write_op flags
