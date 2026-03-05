@@ -384,6 +384,9 @@
 /* Define if libcryptsetup can be used (linux only) */
 #cmakedefine HAVE_LIBCRYPTSETUP
 
+/* Define if libcryptsetup >= 2.8.0 with inline integrity support */
+#cmakedefine HAVE_CRYPT_FORMAT_INLINE
+
 /* Shared library extension, such as .so, .dll or .dylib */
 #cmakedefine CMAKE_SHARED_LIBRARY_SUFFIX "@CMAKE_SHARED_LIBRARY_SUFFIX@"
 
