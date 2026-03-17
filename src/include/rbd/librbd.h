@@ -886,6 +886,67 @@ CEPH_RBD_API int rbd_encryption_load2(rbd_image_t image,
                                       const rbd_encryption_spec_t *specs,
                                       size_t spec_count);
 
+/*
+ * Rotate the encryption key of an already-encrypted image.
+ * The image must have encryption loaded (via rbd_encryption_load2).
+ * The old key is used to decrypt existing data, and the new key
+ * (specified by format/opts/opts_size) is used to re-encrypt.
+ *
+ * Acquires the exclusive lock to prevent concurrent access from other
+ * clients. Returns an error if the lock cannot be acquired.
+ *
+ * If interrupted (crash or error), subsequent I/O returns -EROFS.
+ * Calling rbd_encryption_key_rotate() again resumes re-encryption
+ * from where it left off (cursor-based, idempotent).
+ *
+ * Snapshots taken before rotation are preserved, but their data
+ * becomes unreadable after rotation because the old key is removed
+ * from the LUKS header.
+ *
+ * After successful return, the image handle uses the new encryption key.
+ * The old passphrase will no longer work.
+ */
+CEPH_RBD_API int rbd_encryption_key_rotate(rbd_image_t image,
+                                           rbd_encryption_format_t format,
+                                           rbd_encryption_options_t opts,
+                                           size_t opts_size,
+                                           uint32_t flags);
+
+/**
+ * Resume an interrupted key rotation after image reopen.
+ *
+ * When rbd_encryption_load() returns -EUCLEAN, the image has a pending
+ * key rotation with objects encrypted under different keys. This function
+ * loads both old and new keys, enters dual-key mode, and resumes
+ * re-encryption from the last persisted cursor.
+ *
+ * @param old_format  Encryption format for the old (current) key
+ * @param old_opts    Options containing the old passphrase
+ * @param new_format  Encryption format for the new key
+ * @param new_opts    Options containing the new passphrase
+ * @param flags       Reserved, must be 0
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RBD_API int rbd_encryption_key_rotate_resume(
+    rbd_image_t image,
+    rbd_encryption_format_t old_format,
+    rbd_encryption_options_t old_opts, size_t old_opts_size,
+    rbd_encryption_format_t new_format,
+    rbd_encryption_options_t new_opts, size_t new_opts_size,
+    uint32_t flags);
+
+/**
+ * Get the re-encryption status of an image.
+ *
+ * Sets *progress to the percentage of re-encryption completed (0-99).
+ * If no re-encryption is pending, *progress is set to 100.
+ * A value < 100 means rotate_key() must be called to resume.
+ *
+ * Returns 0 on success, -EINVAL if encryption is not loaded.
+ */
+CEPH_RBD_API int rbd_encryption_reencrypt_status(rbd_image_t image,
+                                                  uint64_t *progress);
+
 /* snapshots */
 CEPH_RBD_API int rbd_snap_list(rbd_image_t image, rbd_snap_info_t *snaps,
                                int *max_snaps);

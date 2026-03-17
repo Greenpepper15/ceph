@@ -2,6 +2,7 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "librbd/api/Image.h"
+#include "librbd/api/KeyRotation.h"
 #include "include/rados/librados.hpp"
 #include "common/dout.h"
 #include "common/errno.h"
@@ -14,18 +15,29 @@
 #include "librbd/ImageState.h"
 #include "librbd/internal.h"
 #include "librbd/Operations.h"
+#include "librbd/crypto/CryptoObjectDispatch.h"
 #include "librbd/Utils.h"
 #include "librbd/api/Config.h"
+#include "librbd/api/Snapshot.h"
 #include "librbd/api/Trash.h"
 #include "librbd/api/Utils.h"
+#include "librbd/crypto/EncryptionFormat.h"
 #include "librbd/crypto/FormatRequest.h"
 #include "librbd/crypto/LoadRequest.h"
+#include "librbd/crypto/ShutDownCryptoRequest.h"
+#include "librbd/crypto/Utils.h"
+#ifdef HAVE_LIBCRYPTSETUP
+#include "librbd/crypto/luks/Header.h"
+#include "include/compat.h"
+#include <openssl/rand.h>
+#endif
 #include "librbd/deep_copy/Handler.h"
 #include "librbd/image/CloneRequest.h"
 #include "librbd/image/RemoveRequest.h"
 #include "librbd/image/PreRemoveRequest.h"
 #include "librbd/io/ImageDispatcherInterface.h"
 #include "librbd/io/ObjectDispatcherInterface.h"
+#include "osdc/Striper.h"
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/ImageDispatchSpec.h"
 #include <boost/scope_exit.hpp>
@@ -1006,7 +1018,187 @@ int Image<I>::encryption_load(I* ictx, const encryption_spec_t *specs,
   auto req = librbd::crypto::LoadRequest<I>::create(
           ictx, std::move(formats), &cond);
   req->send();
-  return cond.wait();
+  int r = cond.wait();
+  if (r == 0) {
+    // Check for interrupted re-encryption. If a cursor exists, the image
+    // has mixed-key objects encrypted with different keys. Allowing I/O
+    // with a single key would corrupt data. Shut down crypto and return
+    // -EUCLEAN so the caller uses key_rotate_resume() instead.
+    std::string cursor;
+    if (librbd::metadata_get(ictx, "rbd_reencrypt_cursor", &cursor) == 0
+        && !cursor.empty()) {
+      lderr(ictx->cct) << "image has a pending key rotation (cursor="
+                        << cursor << "). Objects are encrypted with "
+                        << "different keys. Call "
+                        << "rbd_encryption_key_rotate_resume() with both "
+                        << "old and new passphrases to resume." << dendl;
+      C_SaferCond shut_cond;
+      auto shut_req = librbd::crypto::ShutDownCryptoRequest<I>::create(
+              ictx, &shut_cond);
+      shut_req->send();
+      shut_cond.wait();
+      return -EUCLEAN;
+    }
+  }
+  return r;
+}
+
+template <typename I>
+int Image<I>::encryption_key_rotate(I* ictx, encryption_format_t format,
+                                    encryption_options_t opts, size_t opts_size,
+                                    bool c_api, uint32_t flags) {
+  auto cct = ictx->cct;
+  ldout(cct, 5) << "flags=" << flags << dendl;
+
+  KeyRotationContext<I> ctx;
+  ctx.ictx = ictx;
+  ctx.cct = cct;
+  ctx.format = format;
+  ctx.opts = opts;
+  ctx.c_api = c_api;
+  ctx.flags = flags;
+
+  int r = ctx.validate_flags();
+  if (r != 0) return r;
+
+  crypto::EncryptionFormat<I>* result_format;
+  r = util::create_encryption_format(
+          cct, format, opts, opts_size, c_api, &result_format);
+  if (r != 0) {
+    return r;
+  }
+  ctx.new_format.reset(result_format);
+
+  r = ctx.validate_preconditions();
+  if (r != 0) return r;
+
+#ifndef HAVE_LIBCRYPTSETUP
+  lderr(cct) << "libcryptsetup not available" << dendl;
+  return -ENOTSUP;
+#else
+  if ((r = ctx.compute_object_layout()) != 0) return r;
+  if ((r = ctx.parse_format_params()) != 0) return r;
+
+  ceph::bufferlist header_bl;
+  if ((r = ctx.read_luks_header(&header_bl)) != 0) return r;
+  if ((r = ctx.load_header_and_detect_resume(header_bl)) != 0) return r;
+
+  if (!ctx.is_resume) {
+    if ((r = ctx.prepare_fresh_key()) != 0) return r;
+  }
+
+  if ((r = ctx.create_backup_snapshot()) != 0) return r;
+  if ((r = ctx.swap_crypto_enter_dual_key()) != 0) return r;
+  if ((r = ctx.reencrypt_objects()) != 0) return r;
+  if ((r = ctx.persist_final_state()) != 0) return r;
+  return ctx.finish_and_cleanup();
+#endif // HAVE_LIBCRYPTSETUP
+}
+
+template <typename I>
+int Image<I>::encryption_key_rotate_resume(
+    I* ictx,
+    encryption_format_t old_format, encryption_options_t old_opts,
+    size_t old_opts_size,
+    encryption_format_t new_format, encryption_options_t new_opts,
+    size_t new_opts_size, bool c_api, uint32_t flags) {
+  auto cct = ictx->cct;
+  ldout(cct, 5) << "flags=" << flags << dendl;
+
+  if (ictx->encryption_format) {
+    lderr(cct) << "encryption already loaded; use encryption_key_rotate() "
+               << "instead" << dendl;
+    return -EEXIST;
+  }
+
+  KeyRotationContext<I> ctx;
+  ctx.ictx = ictx;
+  ctx.cct = cct;
+  ctx.format = new_format;
+  ctx.opts = new_opts;
+  ctx.c_api = c_api;
+  ctx.flags = flags;
+
+  int r = ctx.validate_flags();
+  if (r != 0) return r;
+
+  crypto::EncryptionFormat<I>* result_format;
+  r = util::create_encryption_format(
+          cct, new_format, new_opts, new_opts_size, c_api, &result_format);
+  if (r != 0) {
+    return r;
+  }
+  ctx.new_format.reset(result_format);
+
+#ifndef HAVE_LIBCRYPTSETUP
+  lderr(cct) << "libcryptsetup not available" << dendl;
+  return -ENOTSUP;
+#else
+  // Load old encryption key and set up CryptoObjectDispatch
+  if ((r = ctx.load_old_encryption(
+          old_format, old_opts, old_opts_size, c_api)) != 0) return r;
+
+  // Now encryption is loaded; validate remaining preconditions
+  r = ctx.validate_preconditions();
+  if (r != 0) return r;
+
+  if ((r = ctx.compute_object_layout()) != 0) return r;
+  if ((r = ctx.parse_format_params()) != 0) return r;
+
+  ceph::bufferlist header_bl;
+  if ((r = ctx.read_luks_header(&header_bl)) != 0) return r;
+  if ((r = ctx.load_header_and_detect_resume(header_bl)) != 0) return r;
+
+  if (!ctx.is_resume) {
+    lderr(cct) << "no pending re-encryption found; use "
+               << "encryption_key_rotate() instead" << dendl;
+    return -EINVAL;
+  }
+
+  if ((r = ctx.create_backup_snapshot()) != 0) return r;
+  if ((r = ctx.swap_crypto_enter_dual_key()) != 0) return r;
+  if ((r = ctx.reencrypt_objects()) != 0) return r;
+  if ((r = ctx.persist_final_state()) != 0) return r;
+  return ctx.finish_and_cleanup();
+#endif // HAVE_LIBCRYPTSETUP
+}
+
+template <typename I>
+int Image<I>::encryption_reencrypt_status(I* ictx, uint64_t *progress) {
+  if (!ictx->encryption_format) {
+    return -EINVAL;
+  }
+
+  std::string cursor_str;
+  int r = librbd::metadata_get(ictx, "rbd_reencrypt_cursor", &cursor_str);
+  if (r != 0 || cursor_str.empty()) {
+    *progress = 100;
+    return 0;
+  }
+
+  uint64_t cursor_val;
+  try {
+    cursor_val = std::stoull(cursor_str);
+  } catch (const std::exception&) {
+    return -EINVAL;
+  }
+
+  uint64_t data_offset = ictx->get_data_offset();
+  uint64_t raw_size;
+  {
+    std::shared_lock image_locker{ictx->image_lock};
+    raw_size = ictx->get_image_size(CEPH_NOSNAP);
+  }
+  uint64_t first_data = Striper::get_num_objects(ictx->layout, data_offset);
+  uint64_t num_objects = Striper::get_num_objects(ictx->layout, raw_size);
+  uint64_t total = num_objects - first_data;
+  if (total == 0) {
+    *progress = 100;
+    return 0;
+  }
+  uint64_t done = (cursor_val > first_data) ? (cursor_val - first_data) : 0;
+  *progress = std::min(done * 100 / total, static_cast<uint64_t>(99));
+  return 0;
 }
 
 } // namespace api

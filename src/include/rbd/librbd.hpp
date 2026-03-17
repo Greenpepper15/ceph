@@ -601,6 +601,15 @@ public:
   int encryption_load(encryption_format_t format, encryption_options_t opts,
                       size_t opts_size);
   int encryption_load2(const encryption_spec_t *specs, size_t spec_count);
+  int encryption_key_rotate(encryption_format_t format,
+                            encryption_options_t opts, size_t opts_size,
+                            uint32_t flags = 0);
+  int encryption_key_rotate_resume(
+      encryption_format_t old_format, encryption_options_t old_opts,
+      size_t old_opts_size,
+      encryption_format_t new_format, encryption_options_t new_opts,
+      size_t new_opts_size, uint32_t flags = 0);
+  int encryption_reencrypt_status(uint64_t *progress);
 
   /* striping */
   uint64_t get_stripe_unit() const;

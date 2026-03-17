@@ -133,6 +133,21 @@ Object::Object(std::string&& s) {
   new (&impl) object_t(std::move(s));
 }
 
+Object::Object(const std::string& s) {
+  static_assert(impl_size >= sizeof(object_t));
+  new (&impl) object_t(s);
+}
+
+Object::Object(const Object& rhs) {
+  static_assert(impl_size >= sizeof(object_t));
+  new (&impl) object_t(*reinterpret_cast<const object_t*>(&rhs.impl));
+}
+
+Object::Object(Object&& rhs) {
+  static_assert(impl_size >= sizeof(object_t));
+  new (&impl) object_t(*std::move(reinterpret_cast<object_t*>(&rhs.impl)));
+}
+
 Object::~Object() {
   reinterpret_cast<object_t*>(&impl)->~object_t();
 }
@@ -431,6 +446,60 @@ void ReadOp::list_snaps(SnapSet* snaps, bs::error_code* ec) {
   o->ops.push_back(op);
 }
 
+ReadOp& ReadOp::get_xattr(std::string_view name, ceph::buffer::list* out,
+                           bs::error_code* ec) & {
+  auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
+  std::string name_str(name);
+  librados::ObjectOperationTestImpl op =
+    [out, name_str]
+    (librados::TestIoCtxImpl* io_ctx, const std::string& oid, bufferlist*,
+     uint64_t, const SnapContext&, uint64_t*) mutable -> int {
+      std::map<std::string, bufferlist> attrs;
+      int r = io_ctx->xattr_get(oid, &attrs);
+      if (r < 0) return r;
+      auto it = attrs.find(name_str);
+      if (it == attrs.end()) {
+        return -ENODATA;
+      }
+      if (out != nullptr) {
+        *out = it->second;
+      }
+      return 0;
+    };
+  if (ec != NULL) {
+    op = std::bind(save_operation_ec,
+                   std::bind(op, _1, _2, _3, _4, _5, _6), ec);
+  }
+  o->ops.push_back(op);
+  return *this;
+}
+
+ReadOp& ReadOp::get_xattrs(
+    boost::container::flat_map<std::string, ceph::buffer::list>* kv,
+    bs::error_code* ec) & {
+  auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
+  librados::ObjectOperationTestImpl op =
+    [kv]
+    (librados::TestIoCtxImpl* io_ctx, const std::string& oid, bufferlist*,
+     uint64_t, const SnapContext&, uint64_t*) mutable -> int {
+      std::map<std::string, bufferlist> attrs;
+      int r = io_ctx->xattr_get(oid, &attrs);
+      if (r >= 0 && kv != nullptr) {
+        kv->clear();
+        for (auto& [k, v] : attrs) {
+          kv->emplace(k, v);
+        }
+      }
+      return r;
+    };
+  if (ec != NULL) {
+    op = std::bind(save_operation_ec,
+                   std::bind(op, _1, _2, _3, _4, _5, _6), ec);
+  }
+  o->ops.push_back(op);
+  return *this;
+}
+
 void WriteOp::create(bool exclusive) {
   auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
   o->ops.push_back(std::bind(
@@ -478,6 +547,23 @@ void WriteOp::set_alloc_hint(uint64_t expected_object_size,
 		             uint64_t expected_write_size,
 		             alloc_hint::alloc_hint_t flags) {
   // no-op
+}
+
+WriteOp& WriteOp::rmxattr(std::string_view name) & {
+  auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
+  std::string name_str(name);
+  o->ops.push_back(std::bind(
+    &librados::TestIoCtxImpl::xattr_rm, _1, _2, name_str));
+  return *this;
+}
+
+WriteOp& WriteOp::setxattr(std::string_view name,
+                            ceph::buffer::list bl) & {
+  auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
+  std::string name_str(name);
+  o->ops.push_back(std::bind(
+    &librados::TestIoCtxImpl::xattr_set, _1, _2, name_str, bl));
+  return *this;
 }
 
 RADOS::RADOS() = default;

@@ -55,7 +55,10 @@ namespace librbd {
   template <typename> class PluginRegistry;
 
   namespace asio { struct ContextWQ; }
-  namespace crypto { template <typename> class EncryptionFormat; }
+  namespace crypto {
+    template <typename> class CryptoObjectDispatch;
+    template <typename> class EncryptionFormat;
+  }
   namespace exclusive_lock { struct Policy; }
   namespace io {
   class AioCompletion;
@@ -235,6 +238,8 @@ namespace librbd {
     ZTracer::Endpoint trace_endpoint;
 
     std::unique_ptr<crypto::EncryptionFormat<ImageCtx>> encryption_format;
+    std::unique_ptr<crypto::EncryptionFormat<ImageCtx>> old_encryption_format;
+    crypto::CryptoObjectDispatch<ImageCtx>* crypto_object_dispatch = nullptr;
 
     // unit test mock helpers
     static ImageCtx* create(const std::string &image_name,

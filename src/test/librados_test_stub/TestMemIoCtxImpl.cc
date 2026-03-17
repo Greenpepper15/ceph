@@ -783,6 +783,27 @@ int TestMemIoCtxImpl::xattr_set(const std::string& oid, const std::string &name,
   return 0;
 }
 
+int TestMemIoCtxImpl::xattr_rm(const std::string& oid,
+                               const std::string& name) {
+  if (m_client->is_blocklisted()) {
+    return -EBLOCKLISTED;
+  }
+  std::unique_lock l{m_pool->file_lock};
+  auto it = m_pool->file_xattrs.find({get_namespace(), oid});
+  if (it == m_pool->file_xattrs.end()) {
+    return -ENODATA;
+  }
+  auto attr_it = it->second.find(name);
+  if (attr_it == it->second.end()) {
+    return -ENODATA;
+  }
+  it->second.erase(attr_it);
+  if (it->second.empty()) {
+    m_pool->file_xattrs.erase(it);
+  }
+  return 0;
+}
+
 int TestMemIoCtxImpl::zero(const std::string& oid, uint64_t off, uint64_t len,
                            const SnapContext &snapc) {
   if (m_client->is_blocklisted()) {

@@ -75,6 +75,16 @@ struct Image {
                                bool c_api);
   static int encryption_load(ImageCtxT *ictx, const encryption_spec_t *specs,
                              size_t spec_count, bool c_api);
+  static int encryption_key_rotate(ImageCtxT *ictx, encryption_format_t format,
+                                   encryption_options_t opts, size_t opts_size,
+                                   bool c_api, uint32_t flags = 0);
+  static int encryption_key_rotate_resume(
+      ImageCtxT *ictx,
+      encryption_format_t old_format, encryption_options_t old_opts,
+      size_t old_opts_size,
+      encryption_format_t new_format, encryption_options_t new_opts,
+      size_t new_opts_size, bool c_api, uint32_t flags = 0);
+  static int encryption_reencrypt_status(ImageCtxT *ictx, uint64_t *progress);
 };
 
 } // namespace api

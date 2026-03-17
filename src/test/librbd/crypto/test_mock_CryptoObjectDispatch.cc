@@ -462,7 +462,9 @@ TEST_P(TestMockCryptoCryptoObjectDispatch, UnalignedRead) {
                              {16384 + 1, 4096 * 5 - 2}};
   io::ReadExtents aligned_extents = {{0, 4096}, {4096, 4096}, {8192, 4096},
                                      {16384, 4096 * 5}};
-  aligned_extents[0].bl.append(std::string("1") + std::string(4095, '0')); // 4KB read not 4097!
+  // bl must exactly match extent.length — decrypt_aligned_extent()'s
+  // sentinel-based flush fails when bl.length() > extent.length
+  aligned_extents[0].bl.append(std::string("1") + std::string(4095, '0'));
   aligned_extents[1].bl.append(std::string(4095, '0') + std::string("2"));
   aligned_extents[2].bl.append(std::string("03") + std::string(4094, '0'));
   aligned_extents[3].bl.append(std::string("0") + std::string(4095, '4') +
@@ -732,11 +734,14 @@ TEST_P(TestMockCryptoCryptoObjectDispatch, UnalignedWriteFailVersionCheck) {
   ASSERT_EQ(ETIMEDOUT, dispatched_cond.wait_for(0));
 
   version = 1235;
+  // Clear bls before re-appending — they already contain 4096 bytes from
+  // the previous read. decrypt_aligned_extent()'s sentinel-based flush fails
+  // when bl.length() (8192) > extent.length (4096).
   extents[0].bl.clear();
   extents[1].bl.clear();
-  expect_object_read(&extents, version);
   extents[0].bl.append(std::string(4096, '2'));
   extents[1].bl.append(std::string(4096, '3'));
+  expect_object_read(&extents, version);
   dispatcher_ctx->complete(-ERANGE); // complete write, request will restart
   ASSERT_EQ(ETIMEDOUT, dispatched_cond.wait_for(0));
 

@@ -2109,6 +2109,34 @@ namespace librbd {
             ictx, specs, spec_count, false);
   }
 
+  int Image::encryption_key_rotate(encryption_format_t format,
+                                   encryption_options_t opts,
+                                   size_t opts_size,
+                                   uint32_t flags)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    return librbd::api::Image<>::encryption_key_rotate(
+            ictx, format, opts, opts_size, false, flags);
+  }
+
+  int Image::encryption_key_rotate_resume(
+      encryption_format_t old_format, encryption_options_t old_opts,
+      size_t old_opts_size,
+      encryption_format_t new_format, encryption_options_t new_opts,
+      size_t new_opts_size, uint32_t flags)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    return librbd::api::Image<>::encryption_key_rotate_resume(
+            ictx, old_format, old_opts, old_opts_size,
+            new_format, new_opts, new_opts_size, false, flags);
+  }
+
+  int Image::encryption_reencrypt_status(uint64_t *progress)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    return librbd::api::Image<>::encryption_reencrypt_status(ictx, progress);
+  }
+
   int Image::flatten()
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
@@ -4425,6 +4453,38 @@ extern "C" int rbd_encryption_load2(rbd_image_t image,
 {
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   return librbd::api::Image<>::encryption_load(ictx, specs, spec_count, true);
+}
+
+extern "C" int rbd_encryption_key_rotate(rbd_image_t image,
+                                         rbd_encryption_format_t format,
+                                         rbd_encryption_options_t opts,
+                                         size_t opts_size,
+                                         uint32_t flags)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  return librbd::api::Image<>::encryption_key_rotate(
+          ictx, format, opts, opts_size, true, flags);
+}
+
+extern "C" int rbd_encryption_key_rotate_resume(
+    rbd_image_t image,
+    rbd_encryption_format_t old_format,
+    rbd_encryption_options_t old_opts, size_t old_opts_size,
+    rbd_encryption_format_t new_format,
+    rbd_encryption_options_t new_opts, size_t new_opts_size,
+    uint32_t flags)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  return librbd::api::Image<>::encryption_key_rotate_resume(
+          ictx, old_format, old_opts, old_opts_size,
+          new_format, new_opts, new_opts_size, true, flags);
+}
+
+extern "C" int rbd_encryption_reencrypt_status(rbd_image_t image,
+                                                uint64_t *progress)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  return librbd::api::Image<>::encryption_reencrypt_status(ictx, progress);
 }
 
 extern "C" int rbd_flatten(rbd_image_t image)

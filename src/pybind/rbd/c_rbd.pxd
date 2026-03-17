@@ -741,3 +741,17 @@ cdef extern from "rbd/librbd.h" nogil:
     int rbd_encryption_load2(rbd_image_t image,
                              const rbd_encryption_spec_t *specs,
                              size_t spec_count)
+    int rbd_encryption_key_rotate(rbd_image_t image,
+                                  rbd_encryption_format_t format,
+                                  rbd_encryption_options_t opts,
+                                  size_t opts_size,
+                                  uint32_t flags)
+    int rbd_encryption_key_rotate_resume(
+        rbd_image_t image,
+        rbd_encryption_format_t old_format,
+        rbd_encryption_options_t old_opts, size_t old_opts_size,
+        rbd_encryption_format_t new_format,
+        rbd_encryption_options_t new_opts, size_t new_opts_size,
+        uint32_t flags)
+    int rbd_encryption_reencrypt_status(rbd_image_t image,
+                                        uint64_t *progress)

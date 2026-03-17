@@ -35,6 +35,7 @@ void set_crypto(I *image_ctx,
   auto image_dispatch = CryptoImageDispatch::create(crypto->get_data_offset());
   image_ctx->io_object_dispatcher->register_dispatch(object_dispatch);
   image_ctx->io_image_dispatcher->register_dispatch(image_dispatch);
+  image_ctx->crypto_object_dispatch = object_dispatch;
 
   image_ctx->encryption_format = std::move(encryption_format);
 }

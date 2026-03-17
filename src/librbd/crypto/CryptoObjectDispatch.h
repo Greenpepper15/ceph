@@ -4,6 +4,9 @@
 #ifndef CEPH_LIBRBD_CRYPTO_CRYPTO_OBJECT_DISPATCH_H
 #define CEPH_LIBRBD_CRYPTO_CRYPTO_OBJECT_DISPATCH_H
 
+#include <array>
+#include <atomic>
+#include "common/ceph_mutex.h"
 #include "librbd/crypto/CryptoInterface.h"
 #include "librbd/io/Types.h"
 #include "librbd/io/ObjectDispatchInterface.h"
@@ -101,10 +104,46 @@ public:
       uint64_t object_no,
       io::SnapshotSparseBufferlist* snapshot_sparse_bufferlist) override;
 
+  // Re-encryption support: dual-key mode.
+  // swap_crypto atomically replaces the primary crypto with new_crypto
+  // and enters dual-key mode, keeping old_crypto for objects after the
+  // cursor. This avoids shutting down the dispatch (no read/write gap).
+  void swap_crypto(CryptoInterface* new_crypto, CryptoInterface* old_crypto,
+                   uint64_t cursor);
+  void advance_reencrypt_cursor(uint64_t new_cursor);
+  void set_reencrypting_object(int64_t object_no);
+  void finish_reencryption();
+  void complete_io(uint64_t object_no);
+  bool is_reencrypting() const {
+    return m_old_crypto.load(std::memory_order_acquire) != nullptr;
+  }
+
 private:
   ImageCtxT* m_image_ctx;
-  CryptoInterface* m_crypto;
+  std::atomic<CryptoInterface*> m_crypto;
   uint64_t m_data_offset_object_no;
+
+  // Re-encryption state
+  std::atomic<CryptoInterface*> m_old_crypto{nullptr};
+  std::atomic<uint64_t> m_reencrypt_cursor{0};
+  std::atomic<int64_t> m_reencrypting_object_no{-1};
+
+  // Sharded in-flight IO counters for dual-key mode.
+  // Cache-line aligned to avoid false sharing between buckets.
+  // Only incremented/decremented during re-encryption (dual-key mode).
+  static constexpr size_t BUCKET_COUNT = 32;
+  struct alignas(64) InFlightBucket {
+    std::atomic<int> count{0};
+  };
+  std::array<InFlightBucket, BUCKET_COUNT> m_in_flight_buckets;
+  ceph::mutex m_drain_lock =
+      ceph::make_mutex("CryptoObjectDispatch::m_drain_lock");
+  ceph::condition_variable m_drain_cond;
+
+  // Returns crypto for the given object. In dual-key mode, increments
+  // the sharded in-flight counter and sets tracked=true; caller must
+  // call complete_io on IO completion. In normal mode, tracked=false.
+  CryptoInterface* get_crypto_for_object(uint64_t object_no, bool& tracked);
 };
 
 } // namespace crypto

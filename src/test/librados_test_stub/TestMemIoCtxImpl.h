@@ -75,6 +75,7 @@ public:
                 std::map<std::string, bufferlist>* attrset) override;
   int xattr_set(const std::string& oid, const std::string &name,
                 bufferlist& bl) override;
+  int xattr_rm(const std::string& oid, const std::string& name) override;
   int zero(const std::string& oid, uint64_t off, uint64_t len,
            const SnapContext &snapc) override;
 

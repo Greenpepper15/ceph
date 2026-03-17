@@ -167,7 +167,6 @@ RBD_ENCRYPTION_FORMAT_LUKS2 = _RBD_ENCRYPTION_FORMAT_LUKS2
 RBD_ENCRYPTION_FORMAT_LUKS = _RBD_ENCRYPTION_FORMAT_LUKS
 RBD_ENCRYPTION_ALGORITHM_AES128 = _RBD_ENCRYPTION_ALGORITHM_AES128
 RBD_ENCRYPTION_ALGORITHM_AES256 = _RBD_ENCRYPTION_ALGORITHM_AES256
-
 RBD_WRITE_ZEROES_FLAG_THICK_PROVISION = _RBD_WRITE_ZEROES_FLAG_THICK_PROVISION
 
 class Error(Exception):
@@ -5386,6 +5385,122 @@ written." % (self.name, ret, length))
                 if _specs[i].opts != NULL:
                     free(_specs[i].opts)
             free(_specs)
+
+    @requires_not_closed
+    def encryption_key_rotate(self, format, passphrase,
+                              cipher_alg=RBD_ENCRYPTION_ALGORITHM_AES256,
+                              flags=0):
+        """
+        Rotate the encryption key of an already-encrypted image.
+
+        :param format: encryption format (must be RBD_ENCRYPTION_FORMAT_LUKS2)
+        :type format: int
+        :param passphrase: new passphrase for the rotated key
+        :type passphrase: str
+        :param cipher_alg: encryption algorithm
+        :type cipher_alg: int
+        :param flags: reserved, must be 0
+        :type flags: int
+        """
+        passphrase = cstr(passphrase, "passphrase")
+        cdef rbd_encryption_format_t _format = format
+        cdef rbd_encryption_luks2_format_options_t _luks2_opts
+        cdef char* _passphrase = passphrase
+        cdef uint32_t _flags = flags
+
+        if format != RBD_ENCRYPTION_FORMAT_LUKS2:
+            raise make_ex(-errno.ENOTSUP,
+                          'key rotation requires LUKS2 format')
+
+        _luks2_opts.alg = cipher_alg
+        _luks2_opts.passphrase = _passphrase
+        _luks2_opts.passphrase_size = len(passphrase)
+        with nogil:
+            ret = rbd_encryption_key_rotate(self.image, _format,
+                                            &_luks2_opts,
+                                            sizeof(_luks2_opts), _flags)
+        if ret != 0:
+            raise make_ex(
+                ret,
+                'error rotating encryption key on image %s' % self.name)
+
+    @requires_not_closed
+    def encryption_key_rotate_resume(self, old_format, old_passphrase,
+                                      new_format, new_passphrase,
+                                      cipher_alg=RBD_ENCRYPTION_ALGORITHM_AES256,
+                                      flags=0):
+        """
+        Resume a key rotation that was interrupted or detected on load.
+
+        Used when encryption_load() returns -EUCLEAN indicating a pending
+        key rotation.  Loads both old and new keys in dual-key mode and
+        resumes re-encryption from the last persisted cursor.
+
+        :param old_format: old encryption format (must be RBD_ENCRYPTION_FORMAT_LUKS2)
+        :type old_format: int
+        :param old_passphrase: passphrase for the old key
+        :type old_passphrase: str
+        :param new_format: new encryption format (must be RBD_ENCRYPTION_FORMAT_LUKS2)
+        :type new_format: int
+        :param new_passphrase: passphrase for the new key
+        :type new_passphrase: str
+        :param cipher_alg: encryption algorithm
+        :type cipher_alg: int
+        :param flags: reserved, must be 0
+        :type flags: int
+        """
+        old_passphrase = cstr(old_passphrase, "old_passphrase")
+        new_passphrase = cstr(new_passphrase, "new_passphrase")
+        cdef rbd_encryption_format_t _old_format = old_format
+        cdef rbd_encryption_format_t _new_format = new_format
+        cdef rbd_encryption_luks2_format_options_t _old_opts
+        cdef rbd_encryption_luks2_format_options_t _new_opts
+        cdef char* _old_passphrase = old_passphrase
+        cdef char* _new_passphrase = new_passphrase
+        cdef uint32_t _flags = flags
+
+        if old_format != RBD_ENCRYPTION_FORMAT_LUKS2:
+            raise make_ex(-errno.ENOTSUP,
+                          'key rotation resume requires LUKS2 format for old key')
+        if new_format != RBD_ENCRYPTION_FORMAT_LUKS2:
+            raise make_ex(-errno.ENOTSUP,
+                          'key rotation resume requires LUKS2 format for new key')
+
+        _old_opts.alg = cipher_alg
+        _old_opts.passphrase = _old_passphrase
+        _old_opts.passphrase_size = len(old_passphrase)
+        _new_opts.alg = cipher_alg
+        _new_opts.passphrase = _new_passphrase
+        _new_opts.passphrase_size = len(new_passphrase)
+        with nogil:
+            ret = rbd_encryption_key_rotate_resume(
+                self.image,
+                _old_format, &_old_opts, sizeof(_old_opts),
+                _new_format, &_new_opts, sizeof(_new_opts),
+                _flags)
+        if ret != 0:
+            raise make_ex(
+                ret,
+                'error resuming key rotation on image %s' % self.name)
+
+    @requires_not_closed
+    def encryption_reencrypt_status(self):
+        """
+        Get the re-encryption progress of this image.
+
+        :returns: percentage of re-encryption completed (0-100).
+                  100 means no re-encryption pending.
+                  < 100 means rotate_key() must be called to resume.
+        :rtype: int
+        """
+        cdef uint64_t progress
+        with nogil:
+            ret = rbd_encryption_reencrypt_status(self.image, &progress)
+        if ret != 0:
+            raise make_ex(
+                ret,
+                'error getting reencrypt status on image %s' % self.name)
+        return progress
 
 
 cdef class ImageIterator(object):

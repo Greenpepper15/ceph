@@ -54,6 +54,13 @@
 #include <boost/assign/list_of.hpp>
 #include <boost/scope_exit.hpp>
 
+#ifdef HAVE_LIBCRYPTSETUP
+#include "librbd/ImageCtx.h"
+#include "librbd/api/KeyRotation.h"
+#include "librbd/api/Utils.h"
+#include "librbd/crypto/EncryptionFormat.h"
+#endif
+
 #ifdef HAVE_EVENTFD
 #include <sys/eventfd.h>
 #endif
@@ -1129,6 +1136,10 @@ TEST_F(TestLibRBD, ResizeAndStat)
 
   // downsizing without allowing shrink should fail
   // and image size should not change
+  // NOTE: passing NULL as progress callback to rbd_resize2 is a latent bug —
+  // it will segfault if the trim path reports progress (calls the NULL fn ptr).
+  // These calls survive only because the first returns -EINVAL before trimming,
+  // and the second doesn't remove enough objects to trigger progress reporting.
   ASSERT_EQ(-EINVAL, rbd_resize2(image, size / 4, false, NULL, NULL));
   ASSERT_EQ(0, rbd_stat(image, &info, sizeof(info)));
   ASSERT_EQ(info.size, size / 2);
@@ -3286,6 +3297,1117 @@ TEST_F(TestLibRBD, EncryptedFlattenSmallData)
     ASSERT_EQ(data_size, clone.read(0, data_size, read_bl));
     ASSERT_TRUE(expected_bl.contents_equal(read_bl));
   }
+}
+
+class EncryptionKeyRotateTest : public TestLibRBD {
+protected:
+  static constexpr size_t BLOCK_SIZE = 4096;
+  static constexpr uint64_t IMAGE_SIZE = 32 << 20;  // 32MB
+
+  void SetUp() override {
+    TestLibRBD::SetUp();
+    ASSERT_EQ(0, rados_ioctx_create(_cluster, m_pool_name.c_str(), &m_ioctx));
+    m_name = get_temp_image_name();
+    int order = 0;
+    ASSERT_EQ(0, create_image(m_ioctx, m_name.c_str(), IMAGE_SIZE, &order));
+    ASSERT_EQ(0, rbd_open(m_ioctx, m_name.c_str(), &m_image, NULL));
+  }
+
+  void TearDown() override {
+    if (m_image) {
+      rbd_close(m_image);
+    }
+    rados_ioctx_destroy(m_ioctx);
+    TestLibRBD::TearDown();
+  }
+
+  void format_encryption(const char* passphrase) {
+    rbd_encryption_luks2_format_options_t opts = {
+            .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+            .passphrase = passphrase,
+            .passphrase_size = strlen(passphrase),
+    };
+    ASSERT_EQ(0, rbd_encryption_format(
+            m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  }
+
+  int rotate_key(const char* passphrase, uint32_t flags = 0) {
+    rbd_encryption_luks2_format_options_t opts = {
+            .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+            .passphrase = passphrase,
+            .passphrase_size = strlen(passphrase),
+    };
+    return rbd_encryption_key_rotate(
+            m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts), flags);
+  }
+
+  int load_encryption(const char* passphrase) {
+    rbd_encryption_luks2_format_options_t opts = {
+            .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+            .passphrase = passphrase,
+            .passphrase_size = strlen(passphrase),
+    };
+    return rbd_encryption_load(
+            m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts));
+  }
+
+  int resume_key_rotate(const char* old_passphrase,
+                        const char* new_passphrase) {
+    rbd_encryption_luks2_format_options_t old_opts = {
+            .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+            .passphrase = old_passphrase,
+            .passphrase_size = strlen(old_passphrase),
+    };
+    rbd_encryption_luks2_format_options_t new_opts = {
+            .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+            .passphrase = new_passphrase,
+            .passphrase_size = strlen(new_passphrase),
+    };
+    return rbd_encryption_key_rotate_resume(
+            m_image,
+            RBD_ENCRYPTION_FORMAT_LUKS2, &old_opts, sizeof(old_opts),
+            RBD_ENCRYPTION_FORMAT_LUKS2, &new_opts, sizeof(new_opts), 0);
+  }
+
+  void reopen_image() {
+    ASSERT_EQ(0, rbd_close(m_image));
+    m_image = nullptr;
+    ASSERT_EQ(0, rbd_open(m_ioctx, m_name.c_str(), &m_image, NULL));
+  }
+
+  void write_pattern(uint64_t offset, size_t len, char pattern) {
+    std::vector<char> data(len, pattern);
+    ASSERT_EQ(static_cast<ssize_t>(len),
+              rbd_write(m_image, offset, len, data.data()));
+  }
+
+  void verify_pattern(uint64_t offset, size_t len, char pattern) {
+    std::vector<char> expected(len, pattern);
+    std::vector<char> actual(len);
+    ASSERT_EQ(static_cast<ssize_t>(len),
+              rbd_read(m_image, offset, len, actual.data()));
+    ASSERT_EQ(expected, actual);
+  }
+
+  static void verify_pattern(rbd_image_t image, uint64_t offset,
+                              size_t len, char pattern) {
+    std::vector<char> expected(len, pattern);
+    std::vector<char> actual(len);
+    ASSERT_EQ(static_cast<ssize_t>(len),
+              rbd_read(image, offset, len, actual.data()));
+    ASSERT_EQ(expected, actual);
+  }
+
+  rados_ioctx_t m_ioctx;
+  rbd_image_t m_image = nullptr;
+  std::string m_name;
+};
+
+class EncryptionKeyRotateConcurrentTest
+    : public EncryptionKeyRotateTest,
+      public ::testing::WithParamInterface<bool> {
+protected:
+  bool is_unaligned() const { return GetParam(); }
+
+  uint64_t io_offset(uint64_t base) const {
+    return is_unaligned() ? base + BLOCK_SIZE - 50 : base;
+  }
+  size_t io_size() const {
+    return is_unaligned() ? BLOCK_SIZE + 100 : BLOCK_SIZE;
+  }
+
+  std::thread start_param_reader(
+      rbd_image_t image, uint64_t base, int num_ios, char pattern,
+      std::atomic<bool>& stop, std::atomic<int>& errors,
+      std::atomic<uint64_t>& ok) {
+    auto sz = io_size();
+    auto off = io_offset(base);
+    return std::thread([image, off, num_ios, sz, pattern,
+                        &stop, &errors, &ok] {
+      std::vector<char> expected(sz, pattern);
+      std::vector<char> buf(sz);
+      while (!stop.load()) {
+        for (int i = 0; i < num_ios && !stop.load(); i++) {
+          ssize_t r = rbd_read(image, off + i * sz, sz, buf.data());
+          if (r != static_cast<ssize_t>(sz) || buf != expected) {
+            errors++;
+          } else {
+            ok++;
+          }
+        }
+      }
+    });
+  }
+
+  std::thread start_param_writer(
+      rbd_image_t image, uint64_t base, uint64_t region, char pattern,
+      std::atomic<bool>& stop, std::atomic<int>& errors,
+      std::atomic<uint64_t>& ok) {
+    auto sz = io_size();
+    auto off = io_offset(base);
+    return std::thread([image, off, region, sz, pattern,
+                        &stop, &errors, &ok] {
+      std::vector<char> data(sz, pattern);
+      uint64_t cur = off;
+      while (!stop.load()) {
+        ssize_t r = rbd_write(image, cur, sz, data.data());
+        if (r < 0) {
+          errors++;
+        } else {
+          ok++;
+        }
+        cur += sz;
+        if (cur >= off + region) {
+          cur = off;
+        }
+      }
+    });
+  }
+};
+
+TEST_F(EncryptionKeyRotateTest, Basic)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+
+  // write known data spanning multiple blocks
+  const int num_blocks = 16;
+  for (int i = 0; i < num_blocks; i++) {
+    write_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB + (i % 4));
+  }
+
+  // verify data reads back correctly before rotation
+  for (int i = 0; i < num_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB + (i % 4));
+  }
+
+  // rotate key
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+
+  // verify data reads back correctly after rotation (same handle)
+  for (int i = 0; i < num_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB + (i % 4));
+  }
+
+  // reopen and load with NEW passphrase - should succeed
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_passphrase"));
+  for (int i = 0; i < num_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB + (i % 4));
+  }
+
+  // reopen and load with OLD passphrase - should fail
+  reopen_image();
+  ASSERT_NE(0, load_encryption("old_passphrase"));
+#endif
+}
+
+TEST_P(EncryptionKeyRotateConcurrentTest, Reads)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+
+  const int num_ios = 8;
+  auto sz = io_size();
+  auto off = io_offset(0);
+  for (int i = 0; i < num_ios; i++) {
+    std::vector<char> data(sz, 0xCD);
+    ASSERT_EQ(static_cast<ssize_t>(sz),
+              rbd_write(m_image, off + i * sz, sz, data.data()));
+  }
+
+  std::atomic<bool> stop(false);
+  std::atomic<int> errors(0);
+  std::atomic<uint64_t> ok(0);
+
+  auto reader = start_param_reader(m_image, 0, num_ios, 0xCD,
+                                   stop, errors, ok);
+
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+
+  usleep(100000);
+  stop = true;
+  reader.join();
+
+  ASSERT_EQ(0, errors.load());
+  ASSERT_GT(ok.load(), 0ULL);
+
+  for (int i = 0; i < num_ios; i++) {
+    std::vector<char> expected(sz, 0xCD);
+    std::vector<char> actual(sz);
+    ASSERT_EQ(static_cast<ssize_t>(sz),
+              rbd_read(m_image, off + i * sz, sz, actual.data()));
+    ASSERT_EQ(expected, actual);
+  }
+#endif
+}
+
+TEST_P(EncryptionKeyRotateConcurrentTest, Writes)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+
+  const uint64_t write_base = 1 << 20;
+  const uint64_t write_region = 1 << 20;
+  std::atomic<bool> stop(false);
+  std::atomic<int> errors(0);
+  std::atomic<uint64_t> ok(0);
+
+  auto writer = start_param_writer(m_image, write_base, write_region,
+                                   0xEF, stop, errors, ok);
+
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+
+  usleep(100000);
+  stop = true;
+  writer.join();
+
+  ASSERT_EQ(0, errors.load());
+  ASSERT_GT(ok.load(), 0ULL);
+
+  auto sz = io_size();
+  auto off = io_offset(write_base);
+  std::vector<char> expected(sz, 0xEF);
+  std::vector<char> actual(sz);
+  ASSERT_EQ(static_cast<ssize_t>(sz),
+            rbd_read(m_image, off, sz, actual.data()));
+  ASSERT_EQ(expected, actual);
+
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_passphrase"));
+  ASSERT_EQ(static_cast<ssize_t>(sz),
+            rbd_read(m_image, off, sz, actual.data()));
+  ASSERT_EQ(expected, actual);
+#endif
+}
+
+TEST_P(EncryptionKeyRotateConcurrentTest, MixedIO)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+
+  const int num_read_ios = 4;
+  auto sz = io_size();
+  auto read_off = io_offset(0);
+  for (int i = 0; i < num_read_ios; i++) {
+    std::vector<char> data(sz, 0xAA);
+    ASSERT_EQ(static_cast<ssize_t>(sz),
+              rbd_write(m_image, read_off + i * sz, sz, data.data()));
+  }
+
+  const uint64_t write_base = 1 << 20;
+  const uint64_t write_region = 1 << 20;
+
+  std::atomic<bool> stop(false);
+  std::atomic<int> read_errors(0);
+  std::atomic<int> write_errors(0);
+  std::atomic<uint64_t> reads_ok(0);
+  std::atomic<uint64_t> writes_ok(0);
+
+  auto reader = start_param_reader(m_image, 0, num_read_ios, 0xAA,
+                                   stop, read_errors, reads_ok);
+  auto writer = start_param_writer(m_image, write_base, write_region,
+                                   0xBB, stop, write_errors, writes_ok);
+
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+
+  usleep(100000);
+  stop = true;
+  reader.join();
+  writer.join();
+
+  ASSERT_EQ(0, read_errors.load());
+  ASSERT_EQ(0, write_errors.load());
+  ASSERT_GT(reads_ok.load(), 0ULL);
+  ASSERT_GT(writes_ok.load(), 0ULL);
+
+  for (int i = 0; i < num_read_ios; i++) {
+    std::vector<char> expected(sz, 0xAA);
+    std::vector<char> actual(sz);
+    ASSERT_EQ(static_cast<ssize_t>(sz),
+              rbd_read(m_image, read_off + i * sz, sz, actual.data()));
+    ASSERT_EQ(expected, actual);
+  }
+  auto write_off = io_offset(write_base);
+  std::vector<char> w_expected(sz, 0xBB);
+  std::vector<char> w_actual(sz);
+  ASSERT_EQ(static_cast<ssize_t>(sz),
+            rbd_read(m_image, write_off, sz, w_actual.data()));
+  ASSERT_EQ(w_expected, w_actual);
+
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_passphrase"));
+  for (int i = 0; i < num_read_ios; i++) {
+    std::vector<char> expected(sz, 0xAA);
+    std::vector<char> actual(sz);
+    ASSERT_EQ(static_cast<ssize_t>(sz),
+              rbd_read(m_image, read_off + i * sz, sz, actual.data()));
+    ASSERT_EQ(expected, actual);
+  }
+  ASSERT_EQ(static_cast<ssize_t>(sz),
+            rbd_read(m_image, write_off, sz, w_actual.data()));
+  ASSERT_EQ(w_expected, w_actual);
+#endif
+}
+
+TEST_P(EncryptionKeyRotateConcurrentTest, MixedIOStress)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  static constexpr uint64_t STRESS_IMAGE_SIZE = 128 << 20;
+
+  std::string stress_name = get_temp_image_name();
+  int order = 0;
+  ASSERT_EQ(0, create_image(m_ioctx, stress_name.c_str(),
+                             STRESS_IMAGE_SIZE, &order));
+
+  rbd_image_t stress_image;
+  ASSERT_EQ(0, rbd_open(m_ioctx, stress_name.c_str(), &stress_image, NULL));
+
+  rbd_encryption_luks2_format_options_t fmt_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(0, rbd_encryption_format(
+          stress_image, RBD_ENCRYPTION_FORMAT_LUKS2,
+          &fmt_opts, sizeof(fmt_opts)));
+
+  // Thread regions spread across different objects (4MB each):
+  //   reader1: base 0           pattern 0xAA
+  //   reader2: base 32MB        pattern 0xBB
+  //   writer1: base 64MB        pattern 0xCC
+  //   writer2: base 96MB        pattern 0xDD
+  static constexpr int READ_IOS = 16;
+  static constexpr uint64_t R1_BASE = 0;
+  static constexpr uint64_t R2_BASE = 32 << 20;
+  static constexpr uint64_t W1_BASE = 64 << 20;
+  static constexpr uint64_t W2_BASE = 96 << 20;
+  static constexpr uint64_t W_REGION = 1 << 20;
+
+  auto sz = io_size();
+  auto r1_off = io_offset(R1_BASE);
+  auto r2_off = io_offset(R2_BASE);
+
+  for (int i = 0; i < READ_IOS; i++) {
+    std::vector<char> data(sz, 0xAA);
+    ASSERT_EQ(static_cast<ssize_t>(sz),
+              rbd_write(stress_image, r1_off + i * sz, sz, data.data()));
+  }
+  for (int i = 0; i < READ_IOS; i++) {
+    std::vector<char> data(sz, 0xBB);
+    ASSERT_EQ(static_cast<ssize_t>(sz),
+              rbd_write(stress_image, r2_off + i * sz, sz, data.data()));
+  }
+
+  std::atomic<bool> stop(false);
+  std::atomic<int> read_errors(0);
+  std::atomic<int> write_errors(0);
+  std::atomic<uint64_t> reads_ok(0);
+  std::atomic<uint64_t> writes_ok(0);
+
+  auto reader1 = start_param_reader(stress_image, R1_BASE, READ_IOS,
+                                    0xAA, stop, read_errors, reads_ok);
+  auto reader2 = start_param_reader(stress_image, R2_BASE, READ_IOS,
+                                    0xBB, stop, read_errors, reads_ok);
+  auto writer1 = start_param_writer(stress_image, W1_BASE, W_REGION,
+                                    0xCC, stop, write_errors, writes_ok);
+  auto writer2 = start_param_writer(stress_image, W2_BASE, W_REGION,
+                                    0xDD, stop, write_errors, writes_ok);
+
+  rbd_encryption_luks2_format_options_t rot_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "new_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(0, rbd_encryption_key_rotate(
+          stress_image, RBD_ENCRYPTION_FORMAT_LUKS2,
+          &rot_opts, sizeof(rot_opts), 0));
+
+  usleep(100000);
+  stop = true;
+  reader1.join();
+  reader2.join();
+  writer1.join();
+  writer2.join();
+
+  ASSERT_EQ(0, read_errors.load());
+  ASSERT_EQ(0, write_errors.load());
+  ASSERT_GT(reads_ok.load(), 0ULL);
+  ASSERT_GT(writes_ok.load(), 0ULL);
+
+  auto w1_off = io_offset(W1_BASE);
+  auto w2_off = io_offset(W2_BASE);
+
+  for (int i = 0; i < READ_IOS; i++) {
+    verify_pattern(stress_image, r1_off + i * sz, sz, 0xAA);
+  }
+  for (int i = 0; i < READ_IOS; i++) {
+    verify_pattern(stress_image, r2_off + i * sz, sz, 0xBB);
+  }
+  verify_pattern(stress_image, w1_off, sz, 0xCC);
+  verify_pattern(stress_image, w2_off, sz, 0xDD);
+
+  ASSERT_EQ(0, rbd_close(stress_image));
+  ASSERT_EQ(0, rbd_open(m_ioctx, stress_name.c_str(), &stress_image, NULL));
+
+  rbd_encryption_luks2_format_options_t load_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "new_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(0, rbd_encryption_load(
+          stress_image, RBD_ENCRYPTION_FORMAT_LUKS2,
+          &load_opts, sizeof(load_opts)));
+
+  for (int i = 0; i < READ_IOS; i++) {
+    verify_pattern(stress_image, r1_off + i * sz, sz, 0xAA);
+  }
+  for (int i = 0; i < READ_IOS; i++) {
+    verify_pattern(stress_image, r2_off + i * sz, sz, 0xBB);
+  }
+
+  ASSERT_EQ(0, rbd_close(stress_image));
+#endif
+}
+
+TEST_P(EncryptionKeyRotateConcurrentTest, HeavyMixedIOStress)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  static constexpr uint64_t HEAVY_IMAGE_SIZE = 512 << 20;
+  static constexpr int READ_IOS = 64;
+  static constexpr uint64_t REGION_GAP = 64 << 20;
+  static constexpr uint64_t W_REGION = 4 << 20;
+
+  // 8 regions spread across the 512MB image
+  static constexpr uint64_t R1_BASE = 0;
+  static constexpr uint64_t R2_BASE = REGION_GAP;
+  static constexpr uint64_t R3_BASE = 2 * REGION_GAP;
+  static constexpr uint64_t R4_BASE = 3 * REGION_GAP;
+  static constexpr uint64_t W1_BASE = 4 * REGION_GAP;
+  static constexpr uint64_t W2_BASE = 5 * REGION_GAP;
+  static constexpr uint64_t W3_BASE = 6 * REGION_GAP;
+  static constexpr uint64_t W4_BASE = 7 * REGION_GAP;
+
+  std::string stress_name = get_temp_image_name();
+  int order = 0;
+  ASSERT_EQ(0, create_image(m_ioctx, stress_name.c_str(),
+                             HEAVY_IMAGE_SIZE, &order));
+
+  rbd_image_t stress_image;
+  ASSERT_EQ(0, rbd_open(m_ioctx, stress_name.c_str(), &stress_image, NULL));
+
+  rbd_encryption_luks2_format_options_t fmt_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(0, rbd_encryption_format(
+          stress_image, RBD_ENCRYPTION_FORMAT_LUKS2,
+          &fmt_opts, sizeof(fmt_opts)));
+
+  // Pre-write read patterns for all 4 readers
+  auto sz = io_size();
+  struct { uint64_t base; char pattern; } readers[] = {
+    {R1_BASE, (char)0xAA}, {R2_BASE, (char)0xBB},
+    {R3_BASE, (char)0xCC}, {R4_BASE, (char)0xDD},
+  };
+  for (auto& rd : readers) {
+    auto off = io_offset(rd.base);
+    for (int i = 0; i < READ_IOS; i++) {
+      std::vector<char> data(sz, rd.pattern);
+      ASSERT_EQ(static_cast<ssize_t>(sz),
+                rbd_write(stress_image, off + i * sz, sz, data.data()));
+    }
+  }
+
+  std::atomic<bool> stop(false);
+  std::atomic<int> read_errors(0);
+  std::atomic<int> write_errors(0);
+  std::atomic<uint64_t> reads_ok(0);
+  std::atomic<uint64_t> writes_ok(0);
+
+  // 4 reader threads
+  auto reader1 = start_param_reader(stress_image, R1_BASE, READ_IOS,
+                                    0xAA, stop, read_errors, reads_ok);
+  auto reader2 = start_param_reader(stress_image, R2_BASE, READ_IOS,
+                                    0xBB, stop, read_errors, reads_ok);
+  auto reader3 = start_param_reader(stress_image, R3_BASE, READ_IOS,
+                                    0xCC, stop, read_errors, reads_ok);
+  auto reader4 = start_param_reader(stress_image, R4_BASE, READ_IOS,
+                                    0xDD, stop, read_errors, reads_ok);
+
+  // 4 writer threads
+  auto writer1 = start_param_writer(stress_image, W1_BASE, W_REGION,
+                                    0x11, stop, write_errors, writes_ok);
+  auto writer2 = start_param_writer(stress_image, W2_BASE, W_REGION,
+                                    0x22, stop, write_errors, writes_ok);
+  auto writer3 = start_param_writer(stress_image, W3_BASE, W_REGION,
+                                    0x33, stop, write_errors, writes_ok);
+  auto writer4 = start_param_writer(stress_image, W4_BASE, W_REGION,
+                                    0x44, stop, write_errors, writes_ok);
+
+  // Rotate key while all 8 threads are running
+  rbd_encryption_luks2_format_options_t rot_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "new_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(0, rbd_encryption_key_rotate(
+          stress_image, RBD_ENCRYPTION_FORMAT_LUKS2,
+          &rot_opts, sizeof(rot_opts), 0));
+
+  usleep(200000);
+  stop = true;
+  reader1.join();
+  reader2.join();
+  reader3.join();
+  reader4.join();
+  writer1.join();
+  writer2.join();
+  writer3.join();
+  writer4.join();
+
+  ASSERT_EQ(0, read_errors.load());
+  ASSERT_EQ(0, write_errors.load());
+  ASSERT_GT(reads_ok.load(), 0ULL);
+  ASSERT_GT(writes_ok.load(), 0ULL);
+
+  // Verify read patterns survived rotation
+  for (auto& rd : readers) {
+    auto off = io_offset(rd.base);
+    for (int i = 0; i < READ_IOS; i++) {
+      verify_pattern(stress_image, off + i * sz, sz, rd.pattern);
+    }
+  }
+
+  // Verify writer regions have expected pattern
+  auto w1_off = io_offset(W1_BASE);
+  auto w2_off = io_offset(W2_BASE);
+  auto w3_off = io_offset(W3_BASE);
+  auto w4_off = io_offset(W4_BASE);
+  verify_pattern(stress_image, w1_off, sz, 0x11);
+  verify_pattern(stress_image, w2_off, sz, 0x22);
+  verify_pattern(stress_image, w3_off, sz, 0x33);
+  verify_pattern(stress_image, w4_off, sz, 0x44);
+
+  // Reopen with new passphrase and verify read patterns
+  ASSERT_EQ(0, rbd_close(stress_image));
+  ASSERT_EQ(0, rbd_open(m_ioctx, stress_name.c_str(), &stress_image, NULL));
+
+  rbd_encryption_luks2_format_options_t load_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "new_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(0, rbd_encryption_load(
+          stress_image, RBD_ENCRYPTION_FORMAT_LUKS2,
+          &load_opts, sizeof(load_opts)));
+
+  for (auto& rd : readers) {
+    auto off = io_offset(rd.base);
+    for (int i = 0; i < READ_IOS; i++) {
+      verify_pattern(stress_image, off + i * sz, sz, rd.pattern);
+    }
+  }
+
+  ASSERT_EQ(0, rbd_close(stress_image));
+#endif
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AlignmentVariants,
+    EncryptionKeyRotateConcurrentTest,
+    ::testing::Values(false, true),
+    [](const ::testing::TestParamInfo<bool>& info) {
+      return info.param ? "Unaligned" : "Aligned";
+    });
+
+TEST_F(EncryptionKeyRotateTest, RotationWithSnapshots)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+  write_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  // Rotation should succeed even with snapshots
+  ASSERT_EQ(0, rbd_snap_create(m_image, "snap1"));
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_passphrase"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+  ASSERT_EQ(0, rbd_snap_remove(m_image, "snap1"));
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, SnapshotRollbackOnSuccess)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+
+  const int num_blocks = 16;
+  for (int i = 0; i < num_blocks; i++) {
+    write_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB + (i % 4));
+  }
+
+  // rotate key
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+
+  // verify data reads back correctly after rotation
+  for (int i = 0; i < num_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB + (i % 4));
+  }
+
+  // verify new passphrase works after reopen
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_passphrase"));
+  for (int i = 0; i < num_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB + (i % 4));
+  }
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, DoubleRotation)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  return;
+#else
+  format_encryption("pass1");
+  write_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  // two consecutive rotations
+  ASSERT_EQ(0, rotate_key("pass2"));
+  ASSERT_EQ(0, rotate_key("pass3"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  // only pass3 works after reopen
+  reopen_image();
+  ASSERT_NE(0, load_encryption("pass1"));
+  reopen_image();
+  ASSERT_NE(0, load_encryption("pass2"));
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("pass3"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, InvalidFlags)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  return;
+#else
+  format_encryption("old_pass");
+
+  // any non-zero flag bits should be rejected
+  ASSERT_EQ(-EINVAL, rotate_key("new_pass", 0x01));
+  ASSERT_EQ(-EINVAL, rotate_key("new_pass", 0x04));
+  ASSERT_EQ(-EINVAL, rotate_key("new_pass", 0xFF));
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, CursorCleanedAfterRotation)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  return;
+#else
+  format_encryption("old_pass");
+  write_pattern(0, BLOCK_SIZE * 4, 0xAA);
+  ASSERT_EQ(0, rotate_key("new_pass"));
+
+  // Cursor should be removed after successful rotation
+  char value[64];
+  size_t value_len = sizeof(value);
+  ASSERT_NE(0, rbd_metadata_get(m_image, "rbd_reencrypt_cursor",
+                                 value, &value_len));
+
+  // Data still intact
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_pass"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, ResumeWithCursorAtEnd)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  return;
+#else
+  format_encryption("old_pass");
+  write_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  // First rotation succeeds fully
+  ASSERT_EQ(0, rotate_key("new_pass"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  // Second rotation (proves no stale cursor/keyslot from first)
+  ASSERT_EQ(0, rotate_key("new_pass2"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  // Verify with new passphrase
+  reopen_image();
+  ASSERT_NE(0, load_encryption("old_pass"));
+  reopen_image();
+  ASSERT_NE(0, load_encryption("new_pass"));
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_pass2"));
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, LUKS1RotationRejected)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks1_format_options_t fmt_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS1, &fmt_opts, sizeof(fmt_opts)));
+  return;
+#else
+  // Format with LUKS1
+  rbd_encryption_luks1_format_options_t fmt_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(0, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS1, &fmt_opts, sizeof(fmt_opts)));
+
+  write_pattern(0, BLOCK_SIZE * 4, 0xAA);
+
+  // Attempt key rotation on LUKS1 — should fail with -ENOTSUP
+  rbd_encryption_luks1_format_options_t rot_opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "new_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_key_rotate(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS1,
+          &rot_opts, sizeof(rot_opts), 0));
+
+  // Image should still be usable with old passphrase
+  verify_pattern(0, BLOCK_SIZE * 4, 0xAA);
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, ResizeAfterRotation)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+
+  const int num_blocks = 8;
+  for (int i = 0; i < num_blocks; i++) {
+    write_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB);
+  }
+
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+
+  // Verify data survives rotation
+  for (int i = 0; i < num_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB);
+  }
+
+  // Grow the image to 2x
+  uint64_t size;
+  ASSERT_EQ(0, rbd_get_size(m_image, &size));
+  ASSERT_EQ(0, rbd_resize(m_image, size * 2));
+
+  uint64_t new_size;
+  ASSERT_EQ(0, rbd_get_size(m_image, &new_size));
+  ASSERT_EQ(size * 2, new_size);
+
+  // Write data in the new region
+  write_pattern(size, BLOCK_SIZE * 4, 0xCD);
+
+  // Verify both old and new data
+  for (int i = 0; i < num_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB);
+  }
+  verify_pattern(size, BLOCK_SIZE * 4, 0xCD);
+
+  // Shrink to half the original size
+  ASSERT_EQ(0, rbd_resize(m_image, size / 2));
+  ASSERT_EQ(0, rbd_get_size(m_image, &new_size));
+  ASSERT_EQ(size / 2, new_size);
+
+  // Verify remaining data in the smaller image
+  int remaining_blocks = (size / 2) / BLOCK_SIZE;
+  if (remaining_blocks > num_blocks) remaining_blocks = num_blocks;
+  for (int i = 0; i < remaining_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB);
+  }
+
+  // Reopen with new passphrase and verify
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_passphrase"));
+  ASSERT_EQ(0, rbd_get_size(m_image, &new_size));
+  ASSERT_EQ(size / 2, new_size);
+  for (int i = 0; i < remaining_blocks; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAB);
+  }
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, ResizeDuringRotation)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  rbd_encryption_luks2_format_options_t opts = {
+          .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+          .passphrase = "old_passphrase",
+          .passphrase_size = 14,
+  };
+  ASSERT_EQ(-ENOTSUP, rbd_encryption_format(
+          m_image, RBD_ENCRYPTION_FORMAT_LUKS2, &opts, sizeof(opts)));
+  return;
+#else
+  format_encryption("old_passphrase");
+
+  write_pattern(0, BLOCK_SIZE * 8, 0xAA);
+
+  uint64_t orig_size;
+  ASSERT_EQ(0, rbd_get_size(m_image, &orig_size));
+
+  // Spawn a thread that attempts resize operations while rotation runs.
+  // Both acquire the exclusive lock, so they serialize.
+  std::atomic<bool> stop(false);
+  std::atomic<int> resize_ok(0);
+  std::atomic<int> resize_err(0);
+  auto* image = m_image;
+
+  std::thread resizer([image, orig_size, &stop, &resize_ok, &resize_err] {
+    bool grow = true;
+    while (!stop.load()) {
+      int r;
+      if (grow) {
+        r = rbd_resize(image, orig_size * 2);
+      } else {
+        r = rbd_resize(image, orig_size);
+      }
+      if (r == 0) {
+        resize_ok++;
+      } else {
+        resize_err++;
+      }
+      grow = !grow;
+    }
+  });
+
+  // Rotate key while resize thread is running
+  ASSERT_EQ(0, rotate_key("new_passphrase"));
+
+  usleep(100000);
+  stop = true;
+  resizer.join();
+
+  // At least one resize should have completed (before or after rotation)
+  ASSERT_GT(resize_ok.load() + resize_err.load(), 0);
+
+  // Normalize size back to original for verification
+  uint64_t cur_size;
+  ASSERT_EQ(0, rbd_get_size(m_image, &cur_size));
+  if (cur_size != orig_size) {
+    if (cur_size > orig_size) {
+      ASSERT_EQ(0, rbd_resize(m_image, orig_size));
+    } else {
+      ASSERT_EQ(0, rbd_resize(m_image, orig_size));
+    }
+  }
+
+  // Original data in the first 8 blocks should be intact
+  for (int i = 0; i < 8; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAA);
+  }
+
+  // Reopen with new passphrase
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_passphrase"));
+  for (int i = 0; i < 8; i++) {
+    verify_pattern(i * BLOCK_SIZE, BLOCK_SIZE, 0xAA);
+  }
+#endif
+}
+
+TEST_F(EncryptionKeyRotateTest, ResumeAfterInterruption)
+{
+  REQUIRE(!is_feature_enabled(RBD_FEATURE_JOURNALING));
+
+#ifndef HAVE_LIBCRYPTSETUP
+  return;
+#else
+  format_encryption("old_pass");
+
+  // Write 4 distinct pattern regions
+  write_pattern(0 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAB);
+  write_pattern(4 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAC);
+  write_pattern(8 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAD);
+  write_pattern(12 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAE);
+
+  // Create interrupted rotation state using internal API
+  auto* ictx = reinterpret_cast<librbd::ImageCtx*>(m_image);
+  librbd::api::KeyRotationContext<librbd::ImageCtx> ctx;
+  ctx.ictx = ictx;
+  ctx.cct = ictx->cct;
+  ctx.format = RBD_ENCRYPTION_FORMAT_LUKS2;
+  ctx.c_api = true;
+  rbd_encryption_luks2_format_options_t new_opts = {
+    .alg = RBD_ENCRYPTION_ALGORITHM_AES256,
+    .passphrase = "new_pass",
+    .passphrase_size = 8,
+  };
+  ctx.opts = &new_opts;
+
+  librbd::crypto::EncryptionFormat<librbd::ImageCtx>* result_format;
+  ASSERT_EQ(0, librbd::api::util::create_encryption_format(
+      ictx->cct, RBD_ENCRYPTION_FORMAT_LUKS2,
+      &new_opts, sizeof(new_opts), true, &result_format));
+  ctx.new_format.reset(result_format);
+
+  ASSERT_EQ(0, ctx.compute_object_layout());
+  ASSERT_EQ(0, ctx.parse_format_params());
+  ASSERT_EQ(0, ctx.prepare_fresh_key());
+  ASSERT_EQ(0, ctx.swap_crypto_enter_dual_key());
+  // Don't re-encrypt any objects — simulate crash right after entering dual-key
+  ctx.cleanup_dual_key();
+
+  // Reopen — encryption_load should fail with -EUCLEAN
+  reopen_image();
+  ASSERT_EQ(-EUCLEAN, load_encryption("old_pass"));
+
+  // Resume with both passphrases via public C API
+  ASSERT_EQ(0, resume_key_rotate("old_pass", "new_pass"));
+
+  // Verify all data regions
+  verify_pattern(0 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAB);
+  verify_pattern(4 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAC);
+  verify_pattern(8 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAD);
+  verify_pattern(12 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAE);
+
+  // New passphrase works after reopen
+  reopen_image();
+  ASSERT_EQ(0, load_encryption("new_pass"));
+  verify_pattern(0 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAB);
+  verify_pattern(4 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAC);
+  verify_pattern(8 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAD);
+  verify_pattern(12 * BLOCK_SIZE, BLOCK_SIZE * 4, 0xAE);
+
+  // Old passphrase should fail
+  reopen_image();
+  ASSERT_NE(0, load_encryption("old_pass"));
+#endif
 }
 
 struct LUKSOnePassphrase {

@@ -5,13 +5,12 @@
 #define CEPH_LIBRBD_CRYPTO_ENCRYPTION_FORMAT_H
 
 #include <memory>
+#include "librbd/crypto/CryptoInterface.h"
 
 struct Context;
 
 namespace librbd {
 namespace crypto {
-
-struct CryptoInterface;
 
 template <typename ImageCtxT>
 struct EncryptionFormat {
@@ -25,6 +24,7 @@ struct EncryptionFormat {
   virtual void flatten(ImageCtxT* ictx, Context* on_finish) = 0;
 
   virtual CryptoInterface* get_crypto() = 0;
+  virtual void set_crypto(std::unique_ptr<CryptoInterface> crypto) = 0;
 };
 
 } // namespace crypto

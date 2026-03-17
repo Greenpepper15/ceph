@@ -26,6 +26,10 @@ public:
     return m_crypto.get();
   }
 
+  void set_crypto(std::unique_ptr<CryptoInterface> crypto) override {
+    m_crypto = std::move(crypto);
+  }
+
 protected:
   std::unique_ptr<CryptoInterface> m_crypto;
 };

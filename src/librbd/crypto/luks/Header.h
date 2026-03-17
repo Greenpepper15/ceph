@@ -25,11 +25,17 @@ public:
                size_t key_size, const char* cipher_mode, uint32_t sector_size,
                uint32_t data_alignment, bool insecure_fast_mode);
     int add_keyslot(const char* passphrase, size_t passphrase_size);
+    int add_unbound_keyslot(const char* volume_key, size_t volume_key_size,
+                            const char* passphrase, size_t passphrase_size);
+    int find_unbound_keyslot();
     int rewrite_segment_for_inline(const char* cipher, const char* cipher_mode,
                                    const char* integrity);
     int load(const char* type);
     int read_volume_key(const char* passphrase, size_t passphrase_size,
                         char* volume_key, size_t* volume_key_size);
+    int read_volume_key_from_slot(int keyslot, const char* passphrase,
+                                  size_t passphrase_size,
+                                  char* volume_key, size_t* volume_key_size);
 
     int get_sector_size();
     uint64_t get_data_offset();

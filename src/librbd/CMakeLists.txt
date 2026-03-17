@@ -42,6 +42,7 @@ set(librbd_internal_srcs
   api/DiffIterate.cc
   api/Group.cc
   api/Image.cc
+  api/KeyRotation.cc
   api/Io.cc
   api/Migration.cc
   api/Mirror.cc

@@ -237,6 +237,8 @@ struct MockImageCtx {
   ZTracer::Endpoint trace_endpoint;
 
   std::unique_ptr<crypto::MockEncryptionFormat> encryption_format;
+  std::unique_ptr<crypto::MockEncryptionFormat> old_encryption_format;
+  void* crypto_object_dispatch = nullptr;
 
   uint64_t sparse_read_threshold_bytes;
   uint32_t discard_granularity_bytes;

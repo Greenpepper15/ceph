@@ -95,6 +95,7 @@ void ShutDownCryptoRequest<I>::finish(int r) {
   if (r == 0) {
     {
       std::unique_lock image_locker{m_image_ctx->image_lock};
+      m_image_ctx->crypto_object_dispatch = nullptr;
       m_image_ctx->encryption_format.reset();
     }
     

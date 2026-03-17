@@ -102,17 +102,32 @@ int Header::write(const ceph::bufferlist& bl) {
 ssize_t Header::read(ceph::bufferlist* bl) {
   ceph_assert(m_fd != -1);
 
-  // get current header size
-  struct stat st;
-  ssize_t r = fstat(m_fd, &st);
-  if (r < 0) {
-    r = -errno;
-    lderr(m_cct) << "failed to stat anonymous file: " << cpp_strerror(r)
+  // seek to beginning so we read the complete header
+  if (lseek(m_fd, 0, SEEK_SET) < 0) {
+    auto r = -errno;
+    lderr(m_cct) << "failed to seek anonymous file: " << cpp_strerror(r)
                  << dendl;
     return r;
   }
 
-  r = bl->read_fd(m_fd, st.st_size);
+  // use data_offset as header size if available (handles ftruncate in load),
+  // otherwise fall back to file size (for freshly formatted headers)
+  size_t read_size;
+  if (m_cd != nullptr && crypt_get_data_offset(m_cd) > 0) {
+    read_size = crypt_get_data_offset(m_cd) << 9;
+  } else {
+    struct stat st;
+    ssize_t r = fstat(m_fd, &st);
+    if (r < 0) {
+      r = -errno;
+      lderr(m_cct) << "failed to stat anonymous file: " << cpp_strerror(r)
+                   << dendl;
+      return r;
+    }
+    read_size = st.st_size;
+  }
+
+  ssize_t r = bl->read_fd(m_fd, read_size);
   if (r < 0) {
     lderr(m_cct) << "error reading header: " << cpp_strerror(r) << dendl;
   }
@@ -195,6 +210,33 @@ int Header::add_keyslot(const char* passphrase, size_t passphrase_size) {
   return 0;
 }
 
+int Header::add_unbound_keyslot(const char* volume_key,
+                                size_t volume_key_size,
+                                const char* passphrase,
+                                size_t passphrase_size) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_keyslot_add_by_key(
+          m_cd, CRYPT_ANY_SLOT, volume_key, volume_key_size,
+          passphrase, passphrase_size, CRYPT_VOLUME_KEY_NO_SEGMENT);
+  if (r < 0) {
+    lderr(m_cct) << "crypt_keyslot_add_by_key failed: "
+                 << cpp_strerror(r) << dendl;
+  }
+  return r; // keyslot number on success
+}
+
+int Header::find_unbound_keyslot() {
+  ceph_assert(m_cd != nullptr);
+
+  for (int slot = 0; slot < crypt_keyslot_max(CRYPT_LUKS2); slot++) {
+    if (crypt_keyslot_status(m_cd, slot) == CRYPT_SLOT_UNBOUND) {
+      return slot;
+    }
+  }
+  return -1;
+}
+
 // Post-process a LUKS2 header (already formatted via crypt_format() with a
 // placeholder cipher) to produce output equivalent to crypt_format_inline().
 // We cannot call crypt_format_inline() directly because it requires NOP DIF
@@ -248,7 +290,7 @@ int Header::rewrite_segment_for_inline(const char* cipher,
 
   // LUKS2 binary header constants — from struct luks2_hdr_disk in
   // cryptsetup lib/luks2/luks2.h (LUKS2_HDR_BIN_LEN, LUKS2_CHECKSUM_L)
-  static constexpr size_t LUKS2_HDR_BIN_LEN = 4096;      // sizeof(luks2_hdr_disk) 
+  static constexpr size_t LUKS2_HDR_BIN_LEN = 4096;      // sizeof(luks2_hdr_disk)
   // LUKS_HDR_BIN is a fixed binary header that precedes the JSON metadata area in a LUKS2 header.
   static constexpr size_t LUKS2_HDR_SIZE_OFFSET = 8;      // offset of hdr_size field
   static constexpr size_t LUKS2_CHECKSUM_OFFSET = 0x01c0; // offset of csum field
@@ -432,6 +474,23 @@ int Header::read_volume_key(const char* passphrase, size_t passphrase_size,
     return r;
   }
 
+  return 0;
+}
+
+int Header::read_volume_key_from_slot(int keyslot, const char* passphrase,
+                                      size_t passphrase_size,
+                                      char* volume_key,
+                                      size_t* volume_key_size) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_volume_key_get(
+          m_cd, keyslot, volume_key, volume_key_size,
+          passphrase, passphrase_size);
+  if (r < 0) {
+    ldout(m_cct, 20) << "crypt_volume_key_get(slot=" << keyslot
+                     << ") failed: " << cpp_strerror(r) << dendl;
+    return r;
+  }
   return 0;
 }
 
