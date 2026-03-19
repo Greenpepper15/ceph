@@ -44,6 +44,45 @@ namespace api {
 
 static constexpr std::string_view XATTR_NAME = "rbd_reencrypt";
 
+#ifdef HAVE_LIBCRYPTSETUP
+// Detect the OpenSSL cipher suite name and AEAD metadata size from a loaded
+// LUKS header.  Mirrors the detection logic in LoadRequest::handle_read().
+static int detect_cipher_and_meta(CephContext* cct,
+                                  crypto::luks::Header& header,
+                                  size_t volume_key_size,
+                                  std::string* openssl_cipher,
+                                  size_t* meta_size) {
+  *meta_size = 0;
+  openssl_cipher->clear();
+
+#ifdef HAVE_CRYPT_FORMAT_INLINE
+  if (strcmp(header.get_cipher(), "aes") == 0 &&
+      strcmp(header.get_cipher_mode(), "xts-random") == 0) {
+    *meta_size = 48;  // 16 IV + 32 HMAC tag for hmac(sha256)
+    *openssl_cipher = "aes-256-xts";
+  }
+#endif
+
+  if (openssl_cipher->empty()) {
+    if (strcmp(header.get_cipher(), "aes") == 0 &&
+        strcmp(header.get_cipher_mode(), "xts-plain64") == 0) {
+      if (volume_key_size == 32) {
+        *openssl_cipher = "aes-128-xts";
+      } else if (volume_key_size == 64) {
+        *openssl_cipher = "aes-256-xts";
+      }
+    }
+  }
+
+  if (openssl_cipher->empty()) {
+    lderr(cct) << "unsupported cipher: " << header.get_cipher()
+               << "-" << header.get_cipher_mode() << dendl;
+    return -ENOTSUP;
+  }
+  return 0;
+}
+#endif
+
 template <typename I>
 int KeyRotationContext<I>::validate_flags() {
   if (flags != 0) {
@@ -136,6 +175,11 @@ int KeyRotationContext<I>::compute_object_layout() {
   num_objects = Striper::get_num_objects(ictx->layout, raw_size);
   stripe_period = ictx->get_stripe_period();
 
+  // Key rotation assumes simple striping (file_offset = obj_no * object_size).
+  // Complex striping would require Striper::get_file_offset() per object.
+  ceph_assert(ictx->layout.stripe_count == 1);
+  ceph_assert(ictx->layout.stripe_unit == object_size);
+
   // DO NOT move encryption_format out of ictx! get_data_offset() returns 0
   // when encryption_format is nullptr, which breaks image-to-raw offset
   // translation for all concurrent reads.
@@ -186,12 +230,21 @@ int KeyRotationContext<I>::parse_format_params() {
   switch (alg) {
     case RBD_ENCRYPTION_ALGORITHM_AES128:
       cipher = "aes";
+      cipher_mode = "xts-plain64";
       key_size = 32;
       break;
     case RBD_ENCRYPTION_ALGORITHM_AES256:
       cipher = "aes";
+      cipher_mode = "xts-plain64";
       key_size = 64;
       break;
+#ifdef HAVE_CRYPT_FORMAT_INLINE
+    case RBD_ENCRYPTION_ALGORITHM_AES256_HMAC_SHA256:
+      cipher = "cipher_null";
+      cipher_mode = "ecb";
+      key_size = 96;
+      break;
+#endif
     default:
       lderr(cct) << "unsupported encryption algorithm" << dendl;
       return -EINVAL;
@@ -251,11 +304,11 @@ int KeyRotationContext<I>::load_header_and_detect_resume(
     ldout(cct, 1) << "detected interrupted re-encryption (unbound keyslot="
                   << unbound_slot << ", cursor=" << cursor_str << ")" << dendl;
 
-    if (key_size > 64) {
-      lderr(cct) << "key_size " << key_size << " exceeds maximum (64)" << dendl;
+    if (key_size > 128) {
+      lderr(cct) << "key_size " << key_size << " exceeds maximum (128)" << dendl;
       return -EINVAL;
     }
-    char new_vk[64];
+    char new_vk[128];
     size_t new_vk_size = key_size;
     r = header.read_volume_key_from_slot(
         unbound_slot, passphrase.data(), passphrase.size(),
@@ -266,9 +319,19 @@ int KeyRotationContext<I>::load_header_and_detect_resume(
       return -EACCES;
     }
 
+    std::string cipher_suite;
+    size_t cipher_meta_size;
+    r = detect_cipher_and_meta(cct, header, new_vk_size,
+                               &cipher_suite, &cipher_meta_size);
+    if (r != 0) {
+      ceph_memzero_s(new_vk, sizeof(new_vk), sizeof(new_vk));
+      return r;
+    }
     r = crypto::util::build_crypto(
-        cct, reinterpret_cast<const unsigned char*>(new_vk), new_vk_size,
-        header.get_sector_size(), header.get_data_offset(), &new_crypto);
+        cct, cipher_suite.c_str(),
+        reinterpret_cast<const unsigned char*>(new_vk), new_vk_size,
+        header.get_sector_size(), header.get_data_offset(),
+        cipher_meta_size, &new_crypto);
     ceph_memzero_s(new_vk, sizeof(new_vk), sizeof(new_vk));
     if (r != 0) {
       return r;
@@ -302,11 +365,11 @@ int KeyRotationContext<I>::prepare_fresh_key() {
 #ifndef HAVE_LIBCRYPTSETUP
   return -ENOTSUP;
 #else
-  if (key_size > 64) {
-    lderr(cct) << "key_size " << key_size << " exceeds maximum (64)" << dendl;
+  if (key_size > 128) {
+    lderr(cct) << "key_size " << key_size << " exceeds maximum (128)" << dendl;
     return -EINVAL;
   }
-  unsigned char new_key[64];
+  unsigned char new_key[128];
   if (RAND_bytes(new_key, key_size) != 1) {
     lderr(cct) << "failed to generate random encryption key" << dendl;
     return -EAGAIN;
@@ -348,9 +411,18 @@ int KeyRotationContext<I>::prepare_fresh_key() {
     return new_slot;
   }
 
+  std::string cipher_suite;
+  size_t cipher_meta_size;
+  r = detect_cipher_and_meta(cct, header, key_size,
+                             &cipher_suite, &cipher_meta_size);
+  if (r != 0) {
+    ceph_memzero_s(new_key, sizeof(new_key), sizeof(new_key));
+    return r;
+  }
   r = crypto::util::build_crypto(
-      cct, new_key, key_size, header.get_sector_size(),
-      header.get_data_offset(), &new_crypto);
+      cct, cipher_suite.c_str(), new_key, key_size,
+      header.get_sector_size(), header.get_data_offset(),
+      cipher_meta_size, &new_crypto);
   ceph_memzero_s(new_key, sizeof(new_key), sizeof(new_key));
   if (r != 0) {
     return r;
@@ -548,18 +620,53 @@ int KeyRotationContext<I>::reencrypt_objects() {
       // r == 0 with ec set, or r == -ENODATA — xattr absent, proceed
     }
 
-    ceph::bufferlist raw_bl;
-    r = ictx->data_ctx.read(oid, raw_bl, obj_stat_size, 0);
-    if (r < 0) {
-      lderr(cct) << "error reading object " << oid << ": "
-                 << cpp_strerror(r) << dendl;
-      cleanup_dual_key();
-      return r;
-    }
-
     // Crypto offset is relative to the data area (after LUKS header).
     uint64_t file_offset = static_cast<uint64_t>(obj_no) * object_size
                            - data_offset;
+
+    uint32_t old_meta_size = old_crypto->get_meta_size();
+    uint64_t block_size = old_crypto->get_block_size();
+
+    ceph::bufferlist raw_bl;
+    if (old_meta_size > 0) {
+      // AEAD: data and metadata are stored at separate offsets in the
+      // RADOS object. Read them independently and concatenate into the
+      // [data][meta] layout that BlockCrypto::decrypt() expects.
+      uint64_t file_start = static_cast<uint64_t>(obj_no) * object_size;
+      uint64_t obj_data_len = std::min(object_size, raw_size - file_start);
+      obj_data_len = (obj_data_len / block_size) * block_size;
+      uint64_t num_blocks = obj_data_len / block_size;
+
+      ceph::bufferlist data_bl;
+      r = ictx->data_ctx.read(oid, data_bl, obj_data_len, 0);
+      if (r < 0) {
+        lderr(cct) << "error reading data from object " << oid << ": "
+                   << cpp_strerror(r) << dendl;
+        cleanup_dual_key();
+        return r;
+      }
+
+      ceph::bufferlist meta_bl;
+      r = ictx->data_ctx.read(oid, meta_bl,
+                               num_blocks * old_meta_size, object_size);
+      if (r < 0) {
+        lderr(cct) << "error reading metadata from object " << oid << ": "
+                   << cpp_strerror(r) << dendl;
+        cleanup_dual_key();
+        return r;
+      }
+
+      raw_bl = std::move(data_bl);
+      raw_bl.claim_append(meta_bl);
+    } else {
+      r = ictx->data_ctx.read(oid, raw_bl, obj_stat_size, 0);
+      if (r < 0) {
+        lderr(cct) << "error reading object " << oid << ": "
+                   << cpp_strerror(r) << dendl;
+        cleanup_dual_key();
+        return r;
+      }
+    }
 
     r = old_crypto->decrypt(&raw_bl, file_offset);
     if (r != 0) {
@@ -582,8 +689,27 @@ int KeyRotationContext<I>::reencrypt_objects() {
     // Unlike the old marker-byte approach, xattrs don't change object size,
     // so they're compatible with deep copy, mirroring, flatten, and copyup.
     {
+      uint32_t new_meta_size = new_crypto_ptr->get_meta_size();
+
       neorados::WriteOp write_op;
-      write_op.write_full(std::move(raw_bl));
+      if (new_meta_size > 0) {
+        // AEAD: split encrypted output into data and metadata portions,
+        // writing metadata at the correct offset beyond object_size.
+        uint64_t new_block_size = new_crypto_ptr->get_block_size();
+        uint64_t num_blocks = raw_bl.length() /
+                              (new_block_size + new_meta_size);
+        uint64_t data_len = num_blocks * new_block_size;
+        uint64_t meta_len = num_blocks * new_meta_size;
+
+        ceph::bufferlist data_out, meta_out;
+        data_out.substr_of(raw_bl, 0, data_len);
+        meta_out.substr_of(raw_bl, data_len, meta_len);
+
+        write_op.write_full(std::move(data_out));
+        write_op.write(object_size, std::move(meta_out));
+      } else {
+        write_op.write_full(std::move(raw_bl));
+      }
       write_op.setxattr(XATTR_NAME, ceph::bufferlist{});
 
       C_SaferCond write_cond;
@@ -649,13 +775,26 @@ int KeyRotationContext<I>::persist_final_state() {
       luks_type, cipher,
       reinterpret_cast<const char*>(new_crypto_ptr->get_key()),
       new_crypto_ptr->get_key_length(),
-      "xts-plain64", sector_size, stripe_period, false);
+      cipher_mode, sector_size, stripe_period, false);
   if (r != 0) {
     lderr(cct) << "failed to format final header: "
                << cpp_strerror(r) << dendl;
     cleanup_dual_key();
     return r;
   }
+
+#ifdef HAVE_CRYPT_FORMAT_INLINE
+  if (new_crypto_ptr->get_meta_size() > 0) {
+    r = final_header.rewrite_segment_for_inline("aes", "xts-random",
+                                                "hmac(sha256)");
+    if (r != 0) {
+      lderr(cct) << "failed to rewrite final header for AEAD: "
+                 << cpp_strerror(r) << dendl;
+      cleanup_dual_key();
+      return r;
+    }
+  }
+#endif
 
   r = final_header.add_keyslot(passphrase.data(), passphrase.size());
   if (r != 0) {

@@ -49,6 +49,7 @@ struct KeyRotationContext {
   const char* luks_type = nullptr;
   size_t sector_size = 0;
   const char* cipher = nullptr;
+  const char* cipher_mode = nullptr;
   size_t key_size = 0;
   std::string_view passphrase;
 

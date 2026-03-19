@@ -77,7 +77,8 @@ int BlockCrypto<T>::crypt(ceph::bufferlist* data, uint64_t image_offset,
   }
   auto sg = make_scope_guard([&] {
       m_data_cryptor->return_context(ctx, mode); });
-  unsigned char* meta = (unsigned char*)alloca(m_meta_size);
+  unsigned char* meta_buf = m_meta_size > 0
+      ? (unsigned char*)alloca(m_meta_size) : nullptr;
   std::vector<unsigned char> iv(m_iv_size);
   std::vector<unsigned char> data_buf(m_block_size);
   for (size_t i = 0; i < num_blocks; ++i) {
@@ -94,10 +95,10 @@ int BlockCrypto<T>::crypt(ceph::bufferlist* data, uint64_t image_offset,
         data_appender.get_pos_add(m_block_size));
     if (m_meta_size != 0) {
       if (mode == CIPHER_MODE_ENC) {
-        meta = reinterpret_cast<unsigned char*>(
+        meta_buf = reinterpret_cast<unsigned char*>(
             meta_appender->get_pos_add(m_meta_size));
       } else {
-        meta_iter.copy(m_meta_size, reinterpret_cast<char*>(meta));
+        meta_iter.copy(m_meta_size, reinterpret_cast<char*>(meta_buf));
       }
     }
     CryptArgs params;
@@ -107,7 +108,7 @@ int BlockCrypto<T>::crypt(ceph::bufferlist* data, uint64_t image_offset,
     if (m_meta_size != 0) {
       params.iv = iv.data();
       params.iv_len = m_iv_size;
-      params.meta = meta;
+      params.meta = meta_buf;
       params.meta_len = m_meta_size;
     }
     int crypto_output_length = (mode == CIPHER_MODE_DEC) ? 

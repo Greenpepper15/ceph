@@ -285,7 +285,7 @@ struct C_UnalignedObjectReadRequest : public Context {
         m_read_from_parent = true;
         io::util::read_parent<I>(
                 image_ctx, object_no, extents,
-                io_context->get_read_snap(),
+                io_context->read_snap().value_or(CEPH_NOSNAP),
                 parent_trace, this);
       } else {
         complete(r);
@@ -510,6 +510,10 @@ struct C_UnalignedObjectWriteRequest : public Context {
       if (crypto_ret != 0) {
         on_finish->complete(crypto_ret);
         return;
+      }
+
+      if (crypto->get_meta_size() > 0) {
+        new_write_flags |= io::OBJECT_WRITE_FLAG_ENCRYPTED_AEAD_WRITE;
       }
 
       auto ctx = create_context_callback<

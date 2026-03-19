@@ -204,7 +204,7 @@ struct TestMockCryptoCryptoObjectDispatch : public TestMockFixture, ::testing::W
     EXPECT_CALL(*mock_image_ctx->io_object_dispatcher, send(_))
         .WillRepeatedly(Invoke([this, data_extents, version,
                                 params](io::ObjectDispatchSpec *spec) {
-          auto *read = std::get_if<io::ObjectDispatchSpec::ReadRequest>(
+          auto *read = boost::get<io::ObjectDispatchSpec::ReadRequest>(
               &spec->request);
           ASSERT_TRUE(read != nullptr);
 
@@ -269,17 +269,30 @@ struct TestMockCryptoCryptoObjectDispatch : public TestMockFixture, ::testing::W
   void expect_object_write(uint64_t object_off, const std::string& data,
                            int write_flags,
                            std::optional<uint64_t> assert_version) {
+    const auto& params = GetParam();
+
     EXPECT_CALL(*mock_image_ctx->io_object_dispatcher, send(_))
             .WillOnce(Invoke([this, object_off, data, write_flags,
-                              assert_version](io::ObjectDispatchSpec* spec) {
-                auto* write = std::get_if<io::ObjectDispatchSpec::WriteRequest>(
+                              assert_version, params](io::ObjectDispatchSpec* spec) {
+                auto* write = boost::get<io::ObjectDispatchSpec::WriteRequest>(
                         &spec->request);
                 ASSERT_TRUE(write != nullptr);
 
                 ASSERT_EQ(object_off, write->object_off);
-                ASSERT_TRUE(data == write->data.to_str());
-                ASSERT_EQ(write_flags, write->write_flags);
                 ASSERT_EQ(assert_version, write->assert_version);
+
+                // Build expected data and flags based on what the write actually carries
+                std::string expected_data = data;
+                int expected_flags = write_flags;
+                if (params.meta_size > 0 &&
+                    (write->write_flags & io::OBJECT_WRITE_FLAG_ENCRYPTED_AEAD_WRITE)) {
+                  size_t num_blocks = data.length() / params.data_block_size;
+                  expected_data.append(num_blocks * params.meta_size, '\0');
+                  expected_flags |= io::OBJECT_WRITE_FLAG_ENCRYPTED_AEAD_WRITE;
+                }
+
+                ASSERT_TRUE(expected_data == write->data.to_str());
+                ASSERT_EQ(expected_flags, write->write_flags);
 
                 spec->dispatch_result = io::DISPATCH_RESULT_COMPLETE;
                 dispatcher_ctx = &spec->dispatcher_ctx;
@@ -289,7 +302,7 @@ struct TestMockCryptoCryptoObjectDispatch : public TestMockFixture, ::testing::W
   void expect_object_write_same() {
     EXPECT_CALL(*mock_image_ctx->io_object_dispatcher, send(_))
             .WillOnce(Invoke([this](io::ObjectDispatchSpec* spec) {
-                auto* write_same = std::get_if<
+                auto* write_same = boost::get<
                         io::ObjectDispatchSpec::WriteSameRequest>(
                                 &spec->request);
                 ASSERT_TRUE(write_same != nullptr);
@@ -739,6 +752,7 @@ TEST_P(TestMockCryptoCryptoObjectDispatch, UnalignedWriteFailVersionCheck) {
   // when bl.length() (8192) > extent.length (4096).
   extents[0].bl.clear();
   extents[1].bl.clear();
+  expect_object_read(&extents, version);
   extents[0].bl.append(std::string(4096, '2'));
   extents[1].bl.append(std::string(4096, '3'));
   expect_object_read(&extents, version);
