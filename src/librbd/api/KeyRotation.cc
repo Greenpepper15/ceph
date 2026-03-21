@@ -162,7 +162,7 @@ int KeyRotationContext<I>::load_old_encryption(
 
 template <typename I>
 int KeyRotationContext<I>::compute_object_layout() {
-  data_offset = ictx->get_data_offset();
+  data_offset = ictx->encryption_format->get_crypto()->get_data_offset();
   {
     std::shared_lock image_locker{ictx->image_lock};
     raw_size = ictx->get_image_size(CEPH_NOSNAP);

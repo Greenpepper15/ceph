@@ -59,7 +59,7 @@ public:
 
   string make_file_path(const char* relpath) {
     char path[PATH_MAX];
-    sprintf(path, "%s/%s", dir_path, relpath);
+    snprintf(path, sizeof(path), "%s/%s", dir_path, relpath);
     return path;
   }
 

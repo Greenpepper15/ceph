@@ -1183,7 +1183,7 @@ int Image<I>::encryption_reencrypt_status(I* ictx, uint64_t *progress) {
     return -EINVAL;
   }
 
-  uint64_t data_offset = ictx->get_data_offset();
+  uint64_t data_offset = ictx->encryption_format->get_crypto()->get_data_offset();
   uint64_t raw_size;
   {
     std::shared_lock image_locker{ictx->image_lock};

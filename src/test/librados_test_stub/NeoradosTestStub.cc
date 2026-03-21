@@ -446,8 +446,8 @@ void ReadOp::list_snaps(SnapSet* snaps, bs::error_code* ec) {
   o->ops.push_back(op);
 }
 
-ReadOp& ReadOp::get_xattr(std::string_view name, ceph::buffer::list* out,
-                           bs::error_code* ec) & {
+void ReadOp::get_xattr(std::string_view name, ceph::buffer::list* out,
+                       bs::error_code* ec) {
   auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
   std::string name_str(name);
   librados::ObjectOperationTestImpl op =
@@ -471,12 +471,11 @@ ReadOp& ReadOp::get_xattr(std::string_view name, ceph::buffer::list* out,
                    std::bind(op, _1, _2, _3, _4, _5, _6), ec);
   }
   o->ops.push_back(op);
-  return *this;
 }
 
-ReadOp& ReadOp::get_xattrs(
+void ReadOp::get_xattrs(
     boost::container::flat_map<std::string, ceph::buffer::list>* kv,
-    bs::error_code* ec) & {
+    bs::error_code* ec) {
   auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
   librados::ObjectOperationTestImpl op =
     [kv]
@@ -497,7 +496,6 @@ ReadOp& ReadOp::get_xattrs(
                    std::bind(op, _1, _2, _3, _4, _5, _6), ec);
   }
   o->ops.push_back(op);
-  return *this;
 }
 
 void WriteOp::create(bool exclusive) {
@@ -549,21 +547,19 @@ void WriteOp::set_alloc_hint(uint64_t expected_object_size,
   // no-op
 }
 
-WriteOp& WriteOp::rmxattr(std::string_view name) & {
+void WriteOp::rmxattr(std::string_view name) {
   auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
   std::string name_str(name);
   o->ops.push_back(std::bind(
     &librados::TestIoCtxImpl::xattr_rm, _1, _2, name_str));
-  return *this;
 }
 
-WriteOp& WriteOp::setxattr(std::string_view name,
-                            ceph::buffer::list bl) & {
+void WriteOp::setxattr(std::string_view name,
+                        ceph::buffer::list&& bl) {
   auto o = *reinterpret_cast<librados::TestObjectOperationImpl**>(&impl);
   std::string name_str(name);
   o->ops.push_back(std::bind(
     &librados::TestIoCtxImpl::xattr_set, _1, _2, name_str, bl));
-  return *this;
 }
 
 RADOS::RADOS() = default;
