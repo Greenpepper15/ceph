@@ -276,6 +276,7 @@ cdef extern from "rbd/librbd.h" nogil:
     ctypedef enum rbd_encryption_algorithm_t:
         _RBD_ENCRYPTION_ALGORITHM_AES128 "RBD_ENCRYPTION_ALGORITHM_AES128"
         _RBD_ENCRYPTION_ALGORITHM_AES256 "RBD_ENCRYPTION_ALGORITHM_AES256"
+        _RBD_ENCRYPTION_ALGORITHM_AES256_HMAC_SHA256 "RBD_ENCRYPTION_ALGORITHM_AES256_HMAC_SHA256"
 
     ctypedef struct rbd_encryption_luks1_format_options_t:
         rbd_encryption_algorithm_t alg
