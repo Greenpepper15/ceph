@@ -3987,10 +3987,9 @@ int RGWGetObjAttrs_ObjStore_S3::get_decrypt_filter(
   //
   // in the SSE-KMS and SSE-S3 cases, this unfortunately causes us to fetch
   // decryption keys which we don't need :(
-  std::unique_ptr<BlockCrypt> block_crypt; // ignored
-  std::map<std::string, std::string> crypt_http_responses; // ignored
-  return rgw_s3_prepare_decrypt(s, s->yield, attrs, &block_crypt,
-                                crypt_http_responses);
+  static constexpr bool copy_source = false;
+  return rgw_s3_prepare_decrypt(s, s->yield, attrs, nullptr,
+                                nullptr, copy_source);
 }
 
 void RGWGetObjAttrs_ObjStore_S3::send_response()
