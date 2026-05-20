@@ -2587,8 +2587,10 @@ int rgw_s3_prepare_decrypt(req_state* s, optional_yield y,
     aes->set_key(reinterpret_cast<const uint8_t*>(key_bin.c_str()), AES_256_CBC::AES_256_KEYSIZE);
     if (block_crypt) *block_crypt = std::move(aes);
 
-    crypt_http_responses["x-amz-server-side-encryption-customer-algorithm"] = "AES256";
-    crypt_http_responses["x-amz-server-side-encryption-customer-key-MD5"] = keymd5;
+    if (crypt_http_responses) {
+      crypt_http_responses->emplace("x-amz-server-side-encryption-customer-algorithm", "AES256");
+      crypt_http_responses->emplace("x-amz-server-side-encryption-customer-key-MD5", keymd5);
+    }
     return 0;
   }
 
@@ -2809,8 +2811,10 @@ int rgw_s3_prepare_decrypt(req_state* s, optional_yield y,
     ::ceph::crypto::zeroize_for_security(actual_key.data(), actual_key.length());
     if (block_crypt) *block_crypt = std::move(aes);
 
-    crypt_http_responses["x-amz-server-side-encryption"] = "aws:kms";
-    crypt_http_responses["x-amz-server-side-encryption-aws-kms-key-id"] = key_id;
+    if (crypt_http_responses) {
+      crypt_http_responses->emplace("x-amz-server-side-encryption", "aws:kms");
+      crypt_http_responses->emplace("x-amz-server-side-encryption-aws-kms-key-id", key_id);
+    }
     return 0;
   }
 
@@ -2995,7 +2999,9 @@ int rgw_s3_prepare_decrypt(req_state* s, optional_yield y,
     ::ceph::crypto::zeroize_for_security(actual_key.data(), actual_key.length());
     if (block_crypt) *block_crypt = std::move(aes);
 
-    crypt_http_responses["x-amz-server-side-encryption"] = "AES256";
+    if (crypt_http_responses) {
+      crypt_http_responses->emplace("x-amz-server-side-encryption", "AES256");
+    }
     return 0;
   }
 
