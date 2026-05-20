@@ -16,6 +16,73 @@ Object Gateway stores that data in the Ceph Storage Cluster in encrypted form.
 
 .. note:: Server-side encryption keys must be 256-bit long and base64 encoded.
 
+Encryption Algorithm
+====================
+
+.. versionadded:: Umbrella
+
+The Ceph Object Gateway supports two AES-256 encryption algorithms for
+server-side encryption:
+
+**AES-256-CBC** (Cipher Block Chaining)
+  The legacy encryption algorithm. This mode is compatible with older Ceph
+  releases and is the default for backward compatibility. CBC mode encrypts
+  data but does not provide built-in integrity verification.
+
+**AES-256-GCM** (Galois/Counter Mode)
+  A modern authenticated encryption algorithm that provides both
+  confidentiality and integrity protection. GCM mode detects any tampering
+  or corruption of encrypted data. This is the recommended algorithm for
+  new deployments.
+
+The encryption algorithm for new objects can be configured with::
+
+  rgw crypt sse algorithm = aes-256-cbc    # default, for backward compatibility
+  rgw crypt sse algorithm = aes-256-gcm    # recommended for new deployments
+
+.. note:: This setting only affects newly encrypted objects. Existing objects
+          are always decrypted using the algorithm that was used when they
+          were encrypted, regardless of the current setting. This allows
+          CBC-encrypted and GCM-encrypted objects to coexist in the same
+          cluster.
+
+.. important:: When upgrading from an older Ceph release, keep the default
+               ``aes-256-cbc`` setting until all RGW instances have been
+               upgraded. Once all instances support GCM, you can enable
+               ``aes-256-gcm`` for new uploads.
+
+GCM Encryption Format
+---------------------
+
+AES-256-GCM encrypts data in fixed-size plaintext chunks. The chunk size
+is controlled by ``rgw_crypt_aead_chunk_size``; the only supported values
+are ``4096`` (4 KiB) and ``65536`` (64 KiB, the default). Each chunk
+produces ``chunk_size + 16`` bytes of ciphertext: the encrypted data
+followed by a 16-byte authentication tag. The chunk size used at upload
+time is recorded per object (in the ``rgw.crypt.prefetch-align`` xattr)
+and remains in effect for that object regardless of later config changes.
+
+.. list-table:: GCM Size Calculation Example (10,000-byte plaintext)
+   :header-rows: 1
+   :widths: 25 25 25 25
+
+   * - chunk_size
+     - Number of chunks
+     - Authentication tags
+     - Encrypted on disk
+   * - 4 KiB
+     - 3 (⌈10000 ÷ 4096⌉)
+     - 48 bytes
+     - 10,048 bytes
+   * - 64 KiB (default)
+     - 1
+     - 16 bytes
+     - 10,016 bytes
+
+Storage overhead is ``16 / chunk_size``: about 0.4 % at 4 KiB and 0.025 %
+at 64 KiB. S3 API responses always report
+the original plaintext size, so this overhead is transparent to clients.
+
 Customer-Provided Keys
 ======================
 
