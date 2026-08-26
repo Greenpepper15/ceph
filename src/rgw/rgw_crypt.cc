@@ -2742,7 +2742,7 @@ int rgw_s3_prepare_decrypt(req_state* s, optional_yield y,
     /* try to retrieve actual key */
     std::string key_id = get_str_attribute(attrs, RGW_ATTR_CRYPT_KEYID);
     std::string actual_key;
-    res = reconstitute_actual_key_from_kms(s, attrs, y, actual_key);
+    res = reconstitute_actual_key_from_kms(s, attrs, s->penv.kms_cache.get(), y, actual_key);
     if (res != 0) {
       ldpp_dout(s, 10) << "ERROR: failed to retrieve actual key from key_id: " << key_id << dendl;
       s->err.message = "Failed to retrieve the actual key, kms-keyid: " + key_id;
