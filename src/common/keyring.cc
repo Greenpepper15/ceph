@@ -81,6 +81,21 @@ tl::expected<std::unique_ptr<KeyringSecret>, std::error_code> LinuxKeyring::add(
 }
 
 bool LinuxKeyring::supported(std::error_code* ec) noexcept {
+  // Keys live in the process keyring, which is part of a thread's
+  // credentials. Without one installed before the threads started,
+  // every thread that adds a key gets a keyring of its own and the
+  // others cannot read that key. Report that here, at startup, rather
+  // than as an EACCES on some later request.
+  if (!LinuxKeyringSecret::has_process_keyring()) {
+    if (ec != nullptr) {
+      // ENOKEY when no process keyring was installed, ENOSYS or EPERM
+      // when the keyring is not available to us at all. The operator
+      // needs to tell those apart.
+      *ec = std::error_code(errno, std::system_category());
+    }
+    return false;
+  }
+
   LinuxKeyring keyring;
   auto maybe_secret = keyring.add("ceph_test_keyring_support", "ceph");
   if (!maybe_secret) {
@@ -106,8 +121,15 @@ bool LinuxKeyring::supported(std::error_code* ec) noexcept {
   return true;
 }
 
-void LinuxKeyringSecret::initialize_process_keyring() noexcept {
-  keyctl_get_keyring_ID(KEY_SPEC_PROCESS_KEYRING, 1);
+std::error_code LinuxKeyringSecret::initialize_process_keyring() noexcept {
+  if (keyctl_get_keyring_ID(KEY_SPEC_PROCESS_KEYRING, 1) == -1) {
+    return {errno, std::system_category()};
+  }
+  return {};
+}
+
+bool LinuxKeyringSecret::has_process_keyring() noexcept {
+  return keyctl_get_keyring_ID(KEY_SPEC_PROCESS_KEYRING, 0) != -1;
 }
 
 [[nodiscard]] std::error_code LinuxKeyringSecret::read(std::string& out) const {

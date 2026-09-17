@@ -101,10 +101,20 @@ class LinuxKeyringSecret : public KeyringSecret {
 
   ~LinuxKeyringSecret() noexcept override;
 
-  // Initialize the process keyring. Do this before starting any
-  // threads that want to share possession of keys in the process
-  // keyring
-  static void initialize_process_keyring() noexcept;
+  // Install the process keyring into the calling thread's
+  // credentials. Call this after the last fork() and before starting
+  // any thread that reads secrets.
+  //
+  // A thread inherits the credentials of the thread that created it,
+  // and fork() drops the process keyring. A thread that misses it
+  // gets a process keyring of its own the first time it adds a key.
+  // Since "user" keys grant read to possessors only, a secret added
+  // by one thread is then unreadable (EACCES) by every other thread.
+  [[nodiscard]] static std::error_code initialize_process_keyring() noexcept;
+
+  // Whether the calling thread has a process keyring. Sets errno on
+  // failure.
+  [[nodiscard]] static bool has_process_keyring() noexcept;
 
   [[nodiscard]] std::error_code read(std::string& out) const override;
   [[nodiscard]] std::error_code remove() const override;

@@ -1,6 +1,8 @@
 #include <common/keyring.h>
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest.h>
+
+#include <thread>
 extern "C" {
 #include <keyutils.h>
 }
@@ -14,10 +16,13 @@ class LinuxKeyringTest : public ::testing::Test {
   LinuxKeyringTest() : keyring(new LinuxKeyring()) {}
 
   void SetUp() override {
+    // Like the daemons do, before anything adds a key: without it
+    // every thread ends up with a process keyring of its own.
+    const auto init_ec = LinuxKeyringSecret::initialize_process_keyring();
     std::error_code ec;
-    if (!keyring->supported(&ec)) {
-      GTEST_SKIP() << "Linux Keyring is unsupported. " << ec
-                   << ". Skipping test";
+    if (init_ec || !keyring->supported(&ec)) {
+      GTEST_SKIP() << "Linux Keyring is unsupported. "
+                   << (init_ec ? init_ec : ec) << ". Skipping test";
     }
   }
 };
@@ -35,6 +40,25 @@ TEST_F(LinuxKeyringTest, Basics) {
 
   ASSERT_FALSE(keyring_secret->remove());
   ASSERT_TRUE(keyring_secret->read(out));
+}
+
+// Secrets are added and read back on whichever thread happens to
+// serve a request, and "user" keys grant read to possessors only. The
+// process keyring makes all threads possessors - as long as it was
+// installed before they were created.
+TEST_F(LinuxKeyringTest, SecretIsReadableFromAnotherThread) {
+  const std::string secret("secret");
+  auto maybe_keyring_secret = keyring->add("testkey-crossthread", secret);
+  ASSERT_TRUE(maybe_keyring_secret.has_value()) << maybe_keyring_secret.error();
+  auto keyring_secret = std::move(maybe_keyring_secret.value());
+
+  std::string out;
+  std::error_code ec;
+  std::thread reader([&] { ec = keyring_secret->read(out); });
+  reader.join();
+
+  ASSERT_FALSE(ec) << ec.message();
+  ASSERT_EQ(secret, out);
 }
 
 TEST_F(LinuxKeyringTest, Lifecycle) {

@@ -108,14 +108,24 @@ int main(int argc, char *argv[])
   DoutPrefix dp(cct.get(), dout_subsys, "rgw main: ");
   rgw::AppMain main(&dp);
 
-  LinuxKeyringSecret::initialize_process_keyring();
-
   main.init_frontends1(false /* nfs */);
   main.init_numa();
 
   if (g_conf()->daemonize) {
     global_init_daemonize(g_ceph_context);
   }
+
+  /* Install the process keyring after the last fork() - fork() drops
+   * it - and before anything starts the threads that serve requests:
+   * they only inherit it from the thread that creates them. Without
+   * it, secrets the SSE-KMS cache stores are readable only by the
+   * thread that stored them: the first cross thread read fails the
+   * request and turns the cache off. */
+  if (const auto ec = LinuxKeyringSecret::initialize_process_keyring(); ec) {
+    derr << "WARNING: failed to install the process keyring (" << ec.message()
+         << "); the SSE-KMS secret cache will stay disabled" << dendl;
+  }
+
   ceph::mutex mutex = ceph::make_mutex("main");
   SafeTimer init_timer(g_ceph_context, mutex);
   init_timer.init();
