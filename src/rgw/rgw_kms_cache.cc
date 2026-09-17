@@ -26,6 +26,8 @@
 #include <boost/asio/spawn.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
+#include <sstream>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -42,6 +44,27 @@
 #define dout_subsys  ceph_subsys_rgw
 
 namespace rgw::kms {
+
+namespace {
+// Flip rgw_crypt_s3_kms_cache_enabled through the config instead of
+// writing the legacy struct member directly: the member is what the
+// fetch path checks, `config show` reports the config, and an
+// operator has no way to tell the two apart.
+void set_cache_enabled(CephContext* cct, bool enabled) {
+  std::stringstream err;
+  const std::string value(enabled ? "true" : "false");
+  if (cct->_conf.set_val("rgw_crypt_s3_kms_cache_enabled", value, &err) < 0) {
+    ldout(cct, 0) << "KMS Cache: failed to set "
+                     "rgw_crypt_s3_kms_cache_enabled=" << value << ": "
+                  << err.str() << dendl;
+    cct->_conf->rgw_crypt_s3_kms_cache_enabled = enabled;
+    return;
+  }
+  // No apply_changes(): set_val() already refreshed the legacy member
+  // the fetch path reads, and nothing observes this option. Calling it
+  // here would run every other pending observer on a request thread.
+}
+}  // namespace
 
 std::jthread KMSCache::make_ttl_reaper_thread(
     CephContext* cct, KMSSecretCache& cache, std::chrono::seconds ttl) {
@@ -113,9 +136,9 @@ KMSCache::KMSCache(CephContext* _cct, std::unique_ptr<Keyring> _keyring)
 
   std::error_code ec;
   if (!keyring->supported(&ec)) {
-    ldout(cct, 1) << "KMS Cache: " << keyring->name() << " unsupported (error "
-                  << ec << "). Disabling Cache." << dendl;
-    cct->_conf->rgw_crypt_s3_kms_cache_enabled = false;
+    ldout(cct, 0) << "KMS Cache: " << keyring->name() << " unsupported ("
+                  << ec.message() << "). Disabling Cache." << dendl;
+    set_cache_enabled(cct, false);
   }
 }
 
@@ -168,6 +191,16 @@ void KMSCache::stop_ttl_reaper() {
 
 void KMSCache::clear_cache() const {
   cache->clear();
+}
+
+void KMSCache::disable_cache(
+    const DoutPrefixProvider* dpp, std::string_view reason) {
+  ldpp_dout(dpp, 0) << "KMS Cache: disabling the SSE-KMS secret cache: "
+                    << reason
+                    << ". Requests keep working, but each one fetches from "
+                       "the KMS again."
+                    << dendl;
+  set_cache_enabled(cct, false);
 }
 
 int KMSCache::do_cache(
@@ -223,11 +256,13 @@ int KMSCache::do_cache(
         if (!keyring_secret) {
           ldpp_dout(dpp, 5)
               << "KMS Cache: " << cache_key << " keyring add error ("
-              << keyring_secret.error()
-              << "). removing from cache. disabling cache." << dendl;
+              << keyring_secret.error() << "). removing from cache." << dendl;
           cache->remove_if(cache_key, value);
-          disable_cache();
           perfcounter->inc(l_rgw_kms_error_secret_store);
+          disable_cache(
+              dpp, fmt::format(
+                       "{} rejected a secret: {}", keyring->name(),
+                       keyring_secret.error().message()));
           return tl::unexpected(-ERR_INTERNAL_ERROR);
         }
         return std::move(keyring_secret.value());
@@ -242,10 +277,13 @@ int KMSCache::do_cache(
     if (auto ret = result.value()->read(actual_key); ret.value() != 0) {
       ldpp_dout(dpp, 5) << "KMS Cache: " << cache_key << " keyring "
                         << *result.value() << " read error (" << ret
-                        << "). removing from cache. disabling cache." << dendl;
+                        << "). removing from cache." << dendl;
       cache->remove_if(cache_key, value);
-      disable_cache();
       perfcounter->inc(l_rgw_kms_error_secret_store);
+      disable_cache(
+          dpp, fmt::format(
+                   "cannot read back a secret from {}: {}", keyring->name(),
+                   ret.message()));
       return -ERR_INTERNAL_ERROR;
     }
     return 0;

@@ -383,6 +383,147 @@ TEST_F(TestSSEKMSWithTestingKMS, KeyselCollisionAfterClearCache) {
   EXPECT_NE(out_A2, out_B1);
 }
 
+// A secret store that takes secrets but cannot read them back. This
+// is what a kernel keyring looks like when the key was added by one
+// thread and is read by another that does not possess it (EACCES).
+class UnreadableKeyringSecret : public KeyringSecret {
+ public:
+  std::error_code read(std::string& out) const override {
+    return {EACCES, std::system_category()};
+  }
+  std::error_code remove() const override { return {}; }
+  bool initialized() const override { return true; }
+};
+
+class UnreadableKeyring : public Keyring {
+ public:
+  tl::expected<std::unique_ptr<KeyringSecret>, std::error_code> add(
+      const std::string& key, const std::string& val) noexcept override {
+    return std::make_unique<UnreadableKeyringSecret>();
+  }
+  bool supported(std::error_code* ec) noexcept override { return true; }
+  std::string_view name() const noexcept override { return "unreadable"; };
+};
+
+// A secret store that refuses the secret outright, the shape of a
+// keyring that is out of quota or barred by policy.
+class RejectingKeyring : public Keyring {
+ public:
+  tl::expected<std::unique_ptr<KeyringSecret>, std::error_code> add(
+      const std::string& key, const std::string& val) noexcept override {
+    return tl::unexpected(std::error_code(EDQUOT, std::system_category()));
+  }
+  bool supported(std::error_code* ec) noexcept override { return true; }
+  std::string_view name() const noexcept override { return "rejecting"; };
+};
+
+class TestSSEKMSSecretStoreFailure : public ::testing::Test,
+                                     public rgw::kms::KMSCache {
+ public:
+  explicit TestSSEKMSSecretStoreFailure(
+      std::unique_ptr<Keyring> keyring = std::make_unique<UnreadableKeyring>())
+      : rgw::kms::KMSCache(g_ceph_context, std::move(keyring)) {};
+
+ protected:
+  CephContext* cct = g_ceph_context;
+  const NoDoutPrefix no_dpp{cct, ceph_subsys_rgw};
+  std::map<std::string, bufferlist> attrs = {
+      {RGW_ATTR_CRYPT_KEYID,
+       []() {
+         bufferlist bl;
+         bl.append("foo");
+         return bl;
+       }()},
+      {RGW_ATTR_CRYPT_KEYSEL, []() {
+         // AES_ECB(32*"#").decrypt(32*"*")
+         bufferlist bl;
+         bl.append(
+             "\xc6\xb1/\x12\xdc\xf7"
+             "e"
+             "\xe3;\xea\x14\xa4x\x1f"
+             "bX"
+             "\xc6\xb1/\x12\xdc\xf7"
+             "e"
+             "\xe3;\xea\x14\xa4x\x1f"
+             "bX");
+         return bl;
+       }()}};
+
+  void SetUp() override {
+    cct->_conf.set_val("rgw_crypt_s3_kms_cache_enabled", "true");
+    cct->_conf.apply_changes(nullptr);
+  }
+
+  void TearDown() override {
+    perfcounter->reset();
+    cct->_conf.set_val("rgw_crypt_s3_kms_cache_enabled", "true");
+    cct->_conf.apply_changes(nullptr);
+  }
+};
+
+TEST_F(TestSSEKMSSecretStoreFailure, ServesRequestAndDisablesCacheVisibly) {
+  ASSERT_TRUE(cct->_conf->rgw_crypt_s3_kms_cache_enabled);
+  const auto fetches_before =
+      perfcounter->get_tavg_ns(l_rgw_kms_fetch_lat).first;
+  const auto errors_before = perfcounter->get(l_rgw_kms_error_secret_store);
+
+  std::string actual_key;
+  ASSERT_EQ(
+      reconstitute_actual_key_from_kms(
+          &no_dpp, attrs, this, null_yield, actual_key),
+      0);
+  EXPECT_EQ(actual_key, std::string(32, '*'));
+
+  EXPECT_EQ(
+      perfcounter->get(l_rgw_kms_error_secret_store), errors_before + 1);
+  // once through the cache, once for the fallback that saved the request
+  EXPECT_EQ(
+      perfcounter->get_tavg_ns(l_rgw_kms_fetch_lat).first, fetches_before + 2);
+
+  // the unusable entry is gone and the gauge says so
+  EXPECT_EQ(cache->size(), 0u);
+  EXPECT_EQ(cache->perf()->get(static_cast<int>(webcache::Metric::size)), 0u);
+
+  // and the cache is off where an operator can see it
+  EXPECT_FALSE(cct->_conf->rgw_crypt_s3_kms_cache_enabled);
+  EXPECT_FALSE(cct->_conf.get_val<bool>("rgw_crypt_s3_kms_cache_enabled"));
+
+  // a second request stays served, now on the bypass
+  actual_key.clear();
+  ASSERT_EQ(
+      reconstitute_actual_key_from_kms(
+          &no_dpp, attrs, this, null_yield, actual_key),
+      0);
+  EXPECT_EQ(actual_key, std::string(32, '*'));
+  EXPECT_EQ(
+      perfcounter->get(l_rgw_kms_error_secret_store), errors_before + 1);
+}
+
+// Same contract when the store rejects the secret instead of losing
+// it: the request is served, the cache goes away visibly.
+class TestSSEKMSSecretStoreRejects : public TestSSEKMSSecretStoreFailure {
+ public:
+  TestSSEKMSSecretStoreRejects()
+      : TestSSEKMSSecretStoreFailure(std::make_unique<RejectingKeyring>()) {};
+};
+
+TEST_F(TestSSEKMSSecretStoreRejects, ServesRequestAndDisablesCacheVisibly) {
+  ASSERT_TRUE(cct->_conf->rgw_crypt_s3_kms_cache_enabled);
+  const auto errors_before = perfcounter->get(l_rgw_kms_error_secret_store);
+
+  std::string actual_key;
+  ASSERT_EQ(
+      reconstitute_actual_key_from_kms(
+          &no_dpp, attrs, this, null_yield, actual_key),
+      0);
+  EXPECT_EQ(actual_key, std::string(32, '*'));
+  EXPECT_EQ(perfcounter->get(l_rgw_kms_error_secret_store), errors_before + 1);
+  EXPECT_EQ(cache->size(), 0u);
+  EXPECT_EQ(cache->perf()->get(static_cast<int>(webcache::Metric::size)), 0u);
+  EXPECT_FALSE(cct->_conf->rgw_crypt_s3_kms_cache_enabled);
+  EXPECT_FALSE(cct->_conf.get_val<bool>("rgw_crypt_s3_kms_cache_enabled"));
+}
+
 int main(int argc, char** argv) {
   auto args = argv_to_vec(argc, argv);
   std::map<std::string, std::string> defaults{

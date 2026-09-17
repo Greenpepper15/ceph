@@ -1167,22 +1167,56 @@ public:
   };
 };
 
+static int uncached_kms_fetch(
+    const kms::KMSCache::FetchFn& fetch, std::string& actual_key) {
+  const auto ret = fetch(actual_key);
+  if (ret == -ENOENT) {
+    perfcounter->inc(l_rgw_kms_error_permanent);
+  } else if (ret < 0) {
+    perfcounter->inc(l_rgw_kms_error_transient);
+  }
+  return ret;
+}
+
 static int maybe_cache_kms_fetch(
     const DoutPrefixProvider* dpp, const std::string& cache_prefix,
     const std::string& key_id, rgw::kms::KMSCache* kms_cache,
     const kms::KMSCache::FetchFn& fetch, std::string& actual_key,
     optional_yield y) {
-  if (kms_cache == nullptr ||
-      !dpp->get_cct()->_conf->rgw_crypt_s3_kms_cache_enabled) {
-    const auto ret = fetch(actual_key);
-    if (ret == -ENOENT) {
-      perfcounter->inc(l_rgw_kms_error_permanent);
-    } else if (ret < 0) {
-      perfcounter->inc(l_rgw_kms_error_transient);
-    }
-    return ret;
+  // Say which of the two reasons applies. Without this a bypassed
+  // cache is indistinguishable from one that is never hit: neither
+  // touches a cache counter.
+  if (kms_cache == nullptr) {
+    ldpp_dout(dpp, 5) << "KMS Cache: bypassed, no cache in this process"
+                      << dendl;
+    return uncached_kms_fetch(fetch, actual_key);
   }
-  return kms_cache->do_cache(dpp, cache_prefix, key_id, fetch, actual_key, y);
+  if (!dpp->get_cct()->_conf->rgw_crypt_s3_kms_cache_enabled) {
+    ldpp_dout(dpp, 5) << "KMS Cache: bypassed, cache disabled" << dendl;
+    return uncached_kms_fetch(fetch, actual_key);
+  }
+
+  const auto ret =
+      kms_cache->do_cache(dpp, cache_prefix, key_id, fetch, actual_key, y);
+  // do_cache() answers -ERR_INTERNAL_ERROR only when its secret store
+  // failed, and it turns the cache off on its way out. No KMS backend
+  // returns that code, so this pair means "the cache broke, the KMS is
+  // fine": serve the request rather than fail it over a caching
+  // problem. Anything else, including a genuine KMS error that races
+  // an operator disabling the cache, is passed through as it is.
+  if (ret == -ERR_INTERNAL_ERROR &&
+      !dpp->get_cct()->_conf->rgw_crypt_s3_kms_cache_enabled) {
+    ldpp_dout(dpp, 1) << "KMS Cache: disabled itself while serving this "
+                         "request, retrying uncached"
+                      << dendl;
+    if (!actual_key.empty()) {
+      ::ceph::crypto::zeroize_for_security(actual_key.data(),
+                                           actual_key.length());
+      actual_key.clear();
+    }
+    return uncached_kms_fetch(fetch, actual_key);
+  }
+  return ret;
 }
 
 int reconstitute_actual_key_from_kms(

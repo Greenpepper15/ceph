@@ -21,6 +21,7 @@
 #include <boost/asio/strand.hpp>
 #include <chrono>
 #include <future>
+#include <string_view>
 #include <thread>
 #include <variant>
 
@@ -106,6 +107,9 @@ class KMSCache {
       const std::string& key_id, const FetchFn& fetch, std::string& actual_key,
       optional_yield y);
 
-  void disable_cache() { cct->_conf->rgw_crypt_s3_kms_cache_enabled = false; }
+  // Turn the cache off for the remaining life of this process because
+  // its secret store is unusable. Callers fall back to fetching from
+  // the KMS on every request, so this only costs performance.
+  void disable_cache(const DoutPrefixProvider* dpp, std::string_view reason);
 };
 }  // namespace rgw::kms
