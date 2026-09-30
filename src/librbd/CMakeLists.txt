@@ -218,7 +218,8 @@ if(LINUX AND HAVE_LIBCRYPTSETUP)
           crypto/luks/FlattenRequest.cc
           crypto/luks/Header.cc
           crypto/luks/LoadRequest.cc
-          crypto/luks/Magic.cc)
+          crypto/luks/Magic.cc
+          crypto/luks/ReadHeaderRequest.cc)
 endif()
 
 if(HAVE_LIBNBD)
