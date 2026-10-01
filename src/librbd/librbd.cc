@@ -27,6 +27,7 @@
 #include "common/errno.h"
 #include "common/TracepointProvider.h"
 #include "include/buffer_raw.h"
+#include "include/compat.h"
 #include "include/Context.h"
 
 #include "cls/rbd/cls_rbd_client.h"
@@ -2204,6 +2205,74 @@ namespace librbd {
     ImageCtx *ictx = (ImageCtx *)ctx;
     return librbd::api::Image<>::encryption_load(
             ictx, specs, spec_count, false);
+  }
+
+  int Image::encryption_luks_volume_key_get(
+      const encryption_luks_volume_key_get_options_t *opts, size_t opts_size,
+      std::string *volume_key, int *keyslot)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    if (volume_key == nullptr) {
+      return -EINVAL;
+    }
+    size_t key_size = 0;
+    int unlocked = -1;
+    int r = librbd::api::Image<>::encryption_luks_volume_key_get(
+            ictx, opts, opts_size, false, SIZE_MAX, volume_key, &key_size,
+            &unlocked);
+    if (r < 0) {
+      return r;
+    }
+    if (keyslot != nullptr) {
+      *keyslot = unlocked;
+    }
+    return 0;
+  }
+
+  int Image::encryption_luks_keyslot_add(
+      const encryption_luks_keyslot_add_options_t *opts, size_t opts_size)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    return librbd::api::Image<>::encryption_luks_keyslot_add(
+            ictx, opts, opts_size, false);
+  }
+
+  int Image::encryption_luks_keyslot_remove(
+      const encryption_luks_keyslot_remove_options_t *opts, size_t opts_size)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    return librbd::api::Image<>::encryption_luks_keyslot_remove(
+            ictx, opts, opts_size, false);
+  }
+
+  int Image::encryption_luks_keyslot_list(
+      std::vector<encryption_luks_keyslot_info_t> *keyslots,
+      size_t keyslot_info_size)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    if (keyslot_info_size != sizeof(encryption_luks_keyslot_info_t)) {
+      lderr(ictx->cct) << "expected keyslot_info_size: "
+                       << sizeof(encryption_luks_keyslot_info_t) << dendl;
+      return -EINVAL;
+    }
+    return librbd::api::Image<>::encryption_luks_keyslot_list(ictx, keyslots);
+  }
+
+  int Image::encryption_luks_header_dump(std::string *dump)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    if (dump == nullptr) {
+      return -EINVAL;
+    }
+    size_t dump_size = 0;
+    return librbd::api::Image<>::encryption_luks_header_dump(
+            ictx, SIZE_MAX, dump, &dump_size);
+  }
+
+  int Image::encryption_luks_header_restore(const std::string &dump)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    return librbd::api::Image<>::encryption_luks_header_restore(ictx, dump);
   }
 
   int Image::flatten()
@@ -4592,6 +4661,161 @@ extern "C" int rbd_encryption_load2(rbd_image_t image,
 {
   librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
   return librbd::api::Image<>::encryption_load(ictx, specs, spec_count, true);
+}
+
+extern "C" int rbd_encryption_luks_volume_key_get(
+    rbd_image_t image,
+    const rbd_encryption_luks_volume_key_get_options_t *opts,
+    size_t opts_size, char *volume_key, size_t *volume_key_size,
+    int *keyslot)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  if (volume_key_size == nullptr ||
+      (volume_key == nullptr && *volume_key_size > 0)) {
+    return -EINVAL;
+  }
+
+  std::string key;
+  size_t key_size = 0;
+  int unlocked = -1;
+  int r = librbd::api::Image<>::encryption_luks_volume_key_get(
+          ictx, opts, opts_size, true, *volume_key_size, &key, &key_size,
+          &unlocked);
+  if (r == -ERANGE) {
+    *volume_key_size = key_size;
+    return r;
+  } else if (r < 0) {
+    return r;
+  }
+
+  memcpy(volume_key, key.data(), key.size());
+  ceph_memzero_s(key.data(), key.size(), key.size());
+  *volume_key_size = key.size();
+  if (keyslot != nullptr) {
+    *keyslot = unlocked;
+  }
+  return 0;
+}
+
+extern "C" int rbd_encryption_luks_keyslot_add(
+    rbd_image_t image, const rbd_encryption_luks_keyslot_add_options_t *opts,
+    size_t opts_size)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  return librbd::api::Image<>::encryption_luks_keyslot_add(
+          ictx, opts, opts_size, true);
+}
+
+extern "C" int rbd_encryption_luks_keyslot_remove(
+    rbd_image_t image, const rbd_encryption_luks_keyslot_remove_options_t *opts,
+    size_t opts_size)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  return librbd::api::Image<>::encryption_luks_keyslot_remove(
+          ictx, opts, opts_size, true);
+}
+
+extern "C" int rbd_encryption_luks_keyslot_list(
+    rbd_image_t image, rbd_encryption_luks_keyslot_info_t *keyslots,
+    size_t keyslot_info_size, size_t *max_keyslots)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  if (keyslot_info_size != sizeof(rbd_encryption_luks_keyslot_info_t)) {
+    lderr(ictx->cct) << "expected keyslot_info_size: "
+                     << sizeof(rbd_encryption_luks_keyslot_info_t) << dendl;
+    return -EINVAL;
+  }
+  if (max_keyslots == nullptr || (keyslots == nullptr && *max_keyslots > 0)) {
+    return -EINVAL;
+  }
+
+  std::vector<librbd::encryption_luks_keyslot_info_t> cpp_keyslots;
+  int r = librbd::api::Image<>::encryption_luks_keyslot_list(ictx,
+                                                             &cpp_keyslots);
+  if (r < 0) {
+    return r;
+  }
+
+  // check the room before allocating anything: a caller that retries
+  // with a bigger array discards this one without calling the cleanup
+  if (*max_keyslots < cpp_keyslots.size()) {
+    *max_keyslots = cpp_keyslots.size();
+    return -ERANGE;
+  }
+
+  for (size_t i = 0; i < cpp_keyslots.size(); ++i) {
+    auto& k = cpp_keyslots[i];
+    auto& out = keyslots[i];
+    out.keyslot = k.keyslot;
+    out.last = k.last;
+    out.key_size = k.key_size;
+    out.kdf = strdup(k.kdf.c_str());
+    out.hash = strdup(k.hash.c_str());
+    out.kdf_iterations = k.kdf_iterations;
+    out.kdf_memory_kb = k.kdf_memory_kb;
+    out.kdf_threads = k.kdf_threads;
+    if (out.kdf == nullptr || out.hash == nullptr) {
+      for (size_t j = 0; j <= i; ++j) {
+        free(keyslots[j].kdf);
+        free(keyslots[j].hash);
+      }
+      return -ENOMEM;
+    }
+  }
+  *max_keyslots = cpp_keyslots.size();
+  return 0;
+}
+
+extern "C" int rbd_encryption_luks_header_dump(rbd_image_t image, char *dump,
+                                               size_t *dump_size)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  if (dump_size == nullptr || (dump == nullptr && *dump_size > 0)) {
+    return -EINVAL;
+  }
+
+  std::string cpp_dump;
+  size_t size = 0;
+  int r = librbd::api::Image<>::encryption_luks_header_dump(
+          ictx, *dump_size, &cpp_dump, &size);
+  if (r == -ERANGE) {
+    *dump_size = size;
+    return r;
+  } else if (r < 0) {
+    return r;
+  }
+
+  memcpy(dump, cpp_dump.data(), cpp_dump.size());
+  *dump_size = cpp_dump.size();
+  return 0;
+}
+
+extern "C" int rbd_encryption_luks_header_restore(rbd_image_t image,
+                                                  const char *dump,
+                                                  size_t dump_size)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  if (dump == nullptr) {
+    return -EINVAL;
+  }
+  return librbd::api::Image<>::encryption_luks_header_restore(
+          ictx, std::string_view(dump, dump_size));
+}
+
+extern "C" int rbd_encryption_luks_keyslot_list_cleanup(
+    rbd_encryption_luks_keyslot_info_t *keyslots, size_t keyslot_info_size,
+    size_t num_keyslots)
+{
+  if (keyslot_info_size != sizeof(rbd_encryption_luks_keyslot_info_t)) {
+    return -EINVAL;
+  }
+
+  // the strings only: the array belongs to the caller
+  for (size_t i = 0; i < num_keyslots; ++i) {
+    free(keyslots[i].kdf);
+    free(keyslots[i].hash);
+  }
+  return 0;
 }
 
 extern "C" int rbd_flatten(rbd_image_t image)
