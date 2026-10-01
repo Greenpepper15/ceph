@@ -216,10 +216,14 @@ if(LINUX AND HAVE_LIBCRYPTSETUP)
           crypto/luks/LUKSEncryptionFormat.cc
           crypto/luks/FormatRequest.cc
           crypto/luks/FlattenRequest.cc
+          crypto/luks/GetVolumeKeyRequest.cc
           crypto/luks/Header.cc
+          crypto/luks/HeaderBackupRequest.cc
+          crypto/luks/HeaderRestoreRequest.cc
           crypto/luks/LoadRequest.cc
           crypto/luks/Magic.cc
-          crypto/luks/ReadHeaderRequest.cc)
+          crypto/luks/ReadHeaderRequest.cc
+          crypto/luks/UpdateHeaderRequest.cc)
 endif()
 
 if(HAVE_LIBNBD)

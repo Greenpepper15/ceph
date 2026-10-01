@@ -255,6 +255,17 @@ namespace librbd {
     std::string passphrase;
   } encryption_luks_format_options_t;
 
+  typedef struct {
+    int keyslot;
+    bool last;
+    size_t key_size;
+    std::string kdf;
+    std::string hash;
+    uint32_t kdf_iterations;
+    uint32_t kdf_memory_kb;
+    uint32_t kdf_threads;
+  } encryption_luks_keyslot_info_t;
+
 class CEPH_RBD_API RBD
 {
 public:

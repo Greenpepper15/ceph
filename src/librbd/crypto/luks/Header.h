@@ -5,8 +5,10 @@
 #define CEPH_LIBRBD_CRYPTO_LUKS_HEADER_H
 
 #include <libcryptsetup.h>
+#include <vector>
 #include "common/ceph_context.h"
 #include "include/buffer.h"
+#include "include/rbd/librbd.hpp"
 
 namespace librbd {
 namespace crypto {
@@ -47,6 +49,7 @@ public:
     int get_keyslot_max();
     int get_keyslot_key_size(int keyslot);
     int get_keyslot_pbkdf(int keyslot, struct crypt_pbkdf_type* pbkdf);
+    int list_keyslots(std::vector<encryption_luks_keyslot_info_t>* keyslots);
 
     int get_sector_size();
     uint64_t get_data_offset();
