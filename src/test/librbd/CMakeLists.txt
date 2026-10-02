@@ -150,7 +150,8 @@ if(LINUX AND HAVE_LIBCRYPTSETUP)
   list(APPEND unittest_librbd_srcs
           crypto/luks/test_mock_FlattenRequest.cc
           crypto/luks/test_mock_FormatRequest.cc
-          crypto/luks/test_mock_LoadRequest.cc)
+          crypto/luks/test_mock_LoadRequest.cc
+          crypto/luks/test_mock_UpdateHeaderRequest.cc)
 endif()
 
 if(HAVE_LIBNBD)
