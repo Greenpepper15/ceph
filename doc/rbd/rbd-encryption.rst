@@ -142,9 +142,94 @@ randomly-generated encryption key, and is protected by the passphrase read from
 
 By default, AES-256 in xts-plain64 mode (which is the current recommended mode,
 and the usual default for other tools) will be used. The format operation
-allows selecting AES-128 as well. Adding / removing passphrases is currently
-not supported by RBD, but can be applied to the raw RBD data using compatible
-tools such as cryptsetup.
+allows selecting AES-128 as well.
+
+Passphrases can be added to and removed from the LUKS header with:
+
+.. prompt:: bash $
+
+    rbd encryption keyslot add [--keyslot {n}] {image-spec} {volume-key-file} {passphrase-file}
+    rbd encryption keyslot remove --keyslot {n} {image-spec}
+    rbd encryption keyslot list {image-spec}
+
+``keyslot add`` stores the volume key from `volume-key-file`, the key the data
+is encrypted with as written by ``volume-key get``, in a new keyslot, the first
+free one unless ``--keyslot`` is given, protected by the passphrase from
+`passphrase-file`, and prints the keyslot number. The new keyslot gets the key
+derivation settings of the lowest keyslot in use, so it costs as much to
+unlock. ``--pbkdf``, together with ``--hash``, ``--pbkdf-force-iterations``,
+``--pbkdf-memory`` and ``--pbkdf-parallel``, sets them instead, as given.
+``keyslot remove`` wipes the given keyslot; the last keyslot bound to the data
+cannot be removed. ``keyslot list`` needs no passphrase and prints one row per
+keyslot in use, with its key size and key derivation parameters.
+
+Both ``keyslot add`` and ``keyslot remove`` change only the LUKS header. The
+encryption key of the data stays the same, so clients that have the image open
+are not affected. Each command returns once its changes to the header are
+flushed, and nothing is verified afterwards. If a command fails, the header may
+have changed in part; ``keyslot list`` shows its state, and the volume key in
+hand makes any state repairable with ``keyslot remove`` and ``keyslot add``.
+
+The volume key is read from the header with:
+
+.. prompt:: bash $
+
+    rbd encryption volume-key get {image-spec} {passphrase-file} {volume-key-file}
+
+``volume-key get`` unlocks a keyslot with the passphrase from `passphrase-file`,
+writes the volume key to `volume-key-file`, readable by its owner only, and
+prints the keyslot it opened. Whoever holds the volume key can read the image
+without any passphrase: keep the file as safe as the passphrases and delete it
+once the rotation is done.
+
+A copy of the LUKS header, taken before a change, is the way back when a
+failed change leaves the header unreadable:
+
+.. prompt:: bash $
+
+    rbd encryption header dump {image-spec} {dump-file}
+    rbd encryption header restore {image-spec} {dump-file}
+
+``header dump`` writes the image's original header, byte for byte up to the
+data offset, to `dump-file`, readable by its owner only; on a clone only the
+RBD clone magic is replaced by the LUKS magic, so that cryptsetup can read the
+file. ``header restore`` writes a dump back, whole, with libcryptsetup's own
+checks and no others: the dump has to be a valid LUKS header, and while the
+image's header still loads, the data offsets have to match; a header that no
+longer loads is replaced without conditions. A dump holds every keyslot that
+was in use when it was taken, so restoring it brings those passphrases back:
+keep it as safe as the passphrases and delete it once the rotation is done.
+
+A passphrase rotation is a sequence of these commands that keeps the image
+unlockable at every step, with the volume key in the caller's hands for its
+duration: dump the header and keep the dump; read the volume key with the old
+passphrase and keep it, wrapped; add the new passphrase to a free keyslot;
+prove it, by loading the image with the new passphrase or by listing the
+keyslots; record the new passphrase in the key store; remove the keyslot that
+holds the old passphrase; list the keyslots; delete the dump and the key. Each
+command writes the changed 4 KiB ranges of the header one at a time in
+ascending offset order, each acknowledged before the next is issued, flushes
+once at the end, and verifies nothing afterwards. The acknowledgement may come
+from a cache, so only the flush makes the writes durable, and a crash or an
+error before it can leave a partial change, which the volume key makes
+repairable: metadata that lists a keyslot whose key material did not land,
+shown by ``keyslot list`` and repaired by ``keyslot remove`` and ``keyslot
+add``; key material of a keyslot the metadata no longer lists, which is
+unusable without the salt and KDF settings that lived in that metadata; or,
+when both LUKS2 metadata copies or the LUKS1 header record were hit, a header
+that no longer loads, which ``header restore`` brings back. Nothing serializes
+concurrent changes to the same header, so a client that rotates from more than
+one place has to serialize them itself.
+
+.. note::
+   The LUKS header is stored in the image data, so a snapshot taken before a
+   rotation keeps the old keyslots. The old passphrase still unlocks it, and
+   rolling back to it restores the old keyslots in the image. A clone that is
+   formatted with its own encryption needs the passphrase of its parent
+   snapshot until it is flattened.
+
+The same header changes can also be applied to the raw data of an image that
+is not a clone, using compatible tools such as cryptsetup.
 
 The LUKS header size can vary (up to 136MiB in LUKS2), but is usually up to
 16MiB, depending on the version of `libcryptsetup` installed. For optimal
@@ -251,6 +336,23 @@ Here is an example of a command that maps a formatted clone:
 .. prompt:: bash #
 
    rbd device map -t nbd -o encryption-passphrase-file=clone-passphrase.bin,encryption-passphrase-file=passphrase.bin mypool/myclone
+
+Rotate the passphrase of a LUKS-formatted image whose only keyslot is 0:
+
+.. prompt:: bash $
+
+    rbd encryption header dump mypool/myimage header.bin
+    rbd encryption volume-key get mypool/myimage passphrase.bin volume-key.bin
+    rbd encryption keyslot add --keyslot 1 mypool/myimage volume-key.bin new-passphrase.bin
+    rbd encryption keyslot list mypool/myimage
+    rbd encryption keyslot remove --keyslot 0 mypool/myimage
+    rbd encryption keyslot list mypool/myimage
+
+Record `new-passphrase.bin` in the key store before ``keyslot remove``, and
+keep `header.bin` and `volume-key.bin` until the rotation is done: with them
+any interruption is repaired with ``keyslot remove`` and ``keyslot add``, or
+with ``header restore``. Then delete both files: the dump brings the old
+passphrase back when restored, and the key opens the image without any.
 
 .. _journal feature: ../rbd-mirroring/#enable-image-journaling-feature
 .. _Supported Formats: #supported-formats

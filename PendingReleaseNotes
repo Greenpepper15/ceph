@@ -216,6 +216,16 @@
   ``rgw_default_bucket_bilog_type`` configuration option (default:
   ``fifo``). Existing InIndex buckets are unaffected until their next
   reshard, at which point they are automatically migrated to FIFO.
+* RBD: The passphrases of a LUKS-encrypted image can now be rotated with RBD
+  itself. The new ``rbd encryption volume-key get``,
+  ``rbd encryption keyslot add``, ``rbd encryption keyslot remove``,
+  ``rbd encryption keyslot list``, ``rbd encryption header dump`` and
+  ``rbd encryption header restore`` commands, and the matching librbd C, C++
+  and Python APIs, read the volume key out of the header, add and remove
+  keyslots, list the keyslots in use, and copy the header out and back. The
+  caller holds the volume key for a rotation and repairs a failed step with
+  these primitives. The volume key does not change, so clients that have the
+  image open are not affected.
 
 >=21.0.0
 

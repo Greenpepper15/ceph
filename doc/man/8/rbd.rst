@@ -311,6 +311,39 @@ Commands
   Supported formats: *luks1*, *luks2*.
   Supported cipher algorithms: *aes-128*, *aes-256* (default).
 
+:command:`encryption keyslot add` [--keyslot *n*] [--pbkdf *kdf* [--hash *hash*] [--pbkdf-force-iterations *n*] [--pbkdf-memory *kib*] [--pbkdf-parallel *n*]] *image-spec* *volume-key-file* *passphrase-file*
+  Adds a LUKS keyslot that stores the volume key from *volume-key-file*, as
+  written by encryption volume-key get, under the passphrase from
+  *passphrase-file*, and prints its number. Without --keyslot, the first free
+  keyslot is used. The new keyslot gets the key derivation settings of the
+  lowest keyslot in use, unless --pbkdf sets them: *pbkdf2*, *argon2i* or
+  *argon2id*, with the other options used as given.
+
+:command:`encryption keyslot list` *image-spec*
+  Lists the LUKS keyslots in use with their key size and key derivation
+  parameters. No passphrase is needed.
+
+:command:`encryption keyslot remove` --keyslot *n* *image-spec*
+  Removes a LUKS keyslot. The last keyslot bound to the data cannot be
+  removed.
+
+:command:`encryption volume-key get` *image-spec* *passphrase-file* *volume-key-file*
+  Unlocks a LUKS keyslot with the passphrase from *passphrase-file*, writes
+  the volume key, the key the data is encrypted with, to *volume-key-file*,
+  readable by its owner only, and prints the keyslot it opened. The key
+  opens the image without any passphrase.
+
+:command:`encryption header dump` *image-spec* *dump-file*
+  Writes the LUKS header of an image, the bytes up to the data offset, to
+  *dump-file*, readable by its owner only. On a clone the RBD clone magic
+  is replaced by the LUKS magic, so that cryptsetup can read the file. A
+  dump holds every keyslot in use when it was taken.
+
+:command:`encryption header restore` *image-spec* *dump-file*
+  Writes a header dump back to the image, whole, with libcryptsetup's own
+  checks: the dump has to be a valid LUKS header, and while the image's
+  header still loads, the data offsets have to match.
+
 :command:`export` [--export-format *format (1 or 2)*] (*image-spec* | *snap-spec*) [*dest-path*]
   Export image to dest path (use - for stdout).
   The --export-format accepts '1' or '2' currently. Format 2 allow us to export not only the content
