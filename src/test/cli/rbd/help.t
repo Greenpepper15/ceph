@@ -38,6 +38,16 @@
       disk-usage (du)                   Show disk usage stats for pool, image or
                                         snapshot.
       encryption format                 Format image to an encrypted format.
+      encryption header dump            Write the LUKS header of an image to a
+                                        file.
+      encryption header restore         Write a LUKS header dump back to an image.
+      encryption keyslot add            Add a LUKS keyslot that stores the volume
+                                        key under a passphrase.
+      encryption keyslot list (... ls)  List the LUKS keyslots in use.
+      encryption keyslot remove (... rm)
+                                        Remove a LUKS keyslot.
+      encryption volume-key get         Write the volume key of a LUKS image to a
+                                        file.
       export                            Export image to file.
       export-diff                       Export incremental diff to file.
       feature disable                   Disable the specified image feature.
@@ -779,6 +789,132 @@
     --image arg          image name
     --cipher-alg arg     encryption algorithm [possible values: aes-128, aes-256
                          (default)]
+  
+  rbd help encryption header dump
+  usage: rbd encryption header dump [--pool <pool>] [--namespace <namespace>] 
+                                    [--image <image>] 
+                                    <image-spec> <dump-file> 
+  
+  Write the LUKS header of an image to a file.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <dump-file>          path of the file to write the LUKS header to, readable
+                         by its owner only
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+  
+  rbd help encryption header restore
+  usage: rbd encryption header restore [--pool <pool>] [--namespace <namespace>] 
+                                       [--image <image>] 
+                                       <image-spec> <dump-file> 
+  
+  Write a LUKS header dump back to an image.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <dump-file>          path of the file written by encryption header dump
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+  
+  rbd help encryption keyslot add
+  usage: rbd encryption keyslot add
+                             [--pool <pool>] [--namespace <namespace>] 
+                             [--image <image>] [--keyslot <keyslot>] 
+                             [--pbkdf <pbkdf>] [--hash <hash>] 
+                             [--pbkdf-force-iterations <pbkdf-force-iterations>] 
+                             [--pbkdf-memory <pbkdf-memory>] 
+                             [--pbkdf-parallel <pbkdf-parallel>] 
+                             <image-spec> <volume-key-file> <passphrase-file> 
+  
+  Add a LUKS keyslot that stores the volume key under a passphrase.
+  
+  Positional arguments
+    <image-spec>                 image specification
+                                 (example:
+                                 [<pool-name>/[<namespace>/]]<image-name>)
+    <volume-key-file>            path of file containing the volume key, as
+                                 written by volume-key get
+    <passphrase-file>            path of file containing the passphrase for the
+                                 new keyslot
+  
+  Optional arguments
+    -p [ --pool ] arg            pool name
+    --namespace arg              namespace name
+    --image arg                  image name
+    --keyslot arg                LUKS keyslot to add [default: first free keyslot]
+    --pbkdf arg                  key derivation function: pbkdf2, argon2i or
+                                 argon2id [default: the settings of the lowest
+                                 keyslot in use]
+    --hash arg                   hash for pbkdf2
+    --pbkdf-force-iterations arg iterations, the time cost for argon2
+    --pbkdf-memory arg           argon2 memory cost in KiB
+    --pbkdf-parallel arg         argon2 threads
+  
+  rbd help encryption keyslot list
+  usage: rbd encryption keyslot list [--pool <pool>] [--namespace <namespace>] 
+                                     [--image <image>] [--format <format>] 
+                                     [--pretty-format] 
+                                     <image-spec> 
+  
+  List the LUKS keyslots in use.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+    --format arg         output format (plain, json, or xml) [default: plain]
+    --pretty-format      pretty formatting (json and xml)
+  
+  rbd help encryption keyslot remove
+  usage: rbd encryption keyslot remove [--pool <pool>] [--namespace <namespace>] 
+                                       [--image <image>] [--keyslot <keyslot>] 
+                                       <image-spec> 
+  
+  Remove a LUKS keyslot.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+    --keyslot arg        LUKS keyslot to remove (required)
+  
+  rbd help encryption volume-key get
+  usage: rbd encryption volume-key get [--pool <pool>] [--namespace <namespace>] 
+                                       [--image <image>] 
+                                       <image-spec> <passphrase-file>
+                                       <volume-key-file> 
+  
+  Write the volume key of a LUKS image to a file.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <passphrase-file>    path of file containing a passphrase that unlocks the
+                         image
+    <volume-key-file>    path of the file to write the volume key to, readable by
+                         its owner only
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
   
   rbd help export
   usage: rbd export [--pool <pool>] [--namespace <namespace>] [--image <image>] 
@@ -2724,5 +2860,3 @@
     --namespace arg      namespace name
     --image arg          image name
   
-
-
