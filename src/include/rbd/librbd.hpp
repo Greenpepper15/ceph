@@ -692,6 +692,8 @@ public:
   int encryption_luks_keyslot_list(
       std::vector<encryption_luks_keyslot_info_t> *keyslots,
       size_t keyslot_info_size);
+  int encryption_luks_header_dump(std::string *dump);
+  int encryption_luks_header_restore(const std::string &dump);
 
   /* striping */
   uint64_t get_stripe_unit() const;

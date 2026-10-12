@@ -85,6 +85,11 @@ struct Image {
                                             size_t opts_size, bool c_api);
   static int encryption_luks_keyslot_list(
       ImageCtxT *ictx, std::vector<encryption_luks_keyslot_info_t> *keyslots);
+  static int encryption_luks_header_dump(ImageCtxT *ictx, size_t max_size,
+                                         std::string *dump,
+                                         size_t *dump_size);
+  static int encryption_luks_header_restore(ImageCtxT *ictx,
+                                            std::string_view dump);
 };
 
 } // namespace api

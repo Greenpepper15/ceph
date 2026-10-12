@@ -20,6 +20,8 @@ inline ImageCtx *get_image_ctx(MockImageCtx *image_ctx) {
 } // namespace librbd
 
 #include "librbd/crypto/luks/GetVolumeKeyRequest.cc"
+#include "librbd/crypto/luks/HeaderBackupRequest.cc"
+#include "librbd/crypto/luks/HeaderRestoreRequest.cc"
 #include "librbd/crypto/luks/ReadHeaderRequest.cc"
 #include "librbd/crypto/luks/UpdateHeaderRequest.cc"
 
@@ -33,6 +35,8 @@ using ::testing::Return;
 
 struct TestMockCryptoLuksUpdateHeaderRequest : public TestMockFixture {
   typedef GetVolumeKeyRequest<librbd::MockImageCtx> MockGetVolumeKeyRequest;
+  typedef HeaderBackupRequest<librbd::MockImageCtx> MockHeaderBackupRequest;
+  typedef HeaderRestoreRequest<librbd::MockImageCtx> MockHeaderRestoreRequest;
   typedef ReadHeaderRequest<librbd::MockImageCtx> MockReadHeaderRequest;
   typedef UpdateHeaderRequest<librbd::MockImageCtx> MockUpdateHeaderRequest;
 
@@ -290,6 +294,39 @@ struct TestMockCryptoLuksUpdateHeaderRequest : public TestMockFixture {
       *key_size = size;
     }
     return r;
+  }
+
+  int header_dump(std::string* dump, size_t* dump_size = nullptr,
+                  size_t max_size = SIZE_MAX) {
+    size_t size = 0;
+    auto r = run([&](Context* ctx) {
+      return MockHeaderBackupRequest::create(mock_image_ctx, max_size, dump,
+                                             &size, ctx);
+    });
+    if (dump_size != nullptr) {
+      *dump_size = size;
+    }
+    return r;
+  }
+
+  int header_restore(const std::string& dump) {
+    return run([&](Context* ctx) {
+      return MockHeaderRestoreRequest::create(mock_image_ctx, dump, ctx);
+    });
+  }
+
+  // a header dump of another image whose data offset differs: the same
+  // version, formatted with a larger alignment
+  std::string other_header_dump(const char* type, uint32_t sector_size) {
+    Header header(mock_image_ctx->cct);
+    EXPECT_EQ(0, header.init());
+    EXPECT_EQ(0, header.format(type, "aes", nullptr, 64, "xts-plain64",
+                               sector_size, 3 * OBJECT_SIZE, true));
+    EXPECT_EQ(0, header.add_keyslot(passphrase.c_str(), passphrase.size()));
+    ceph::bufferlist bl;
+    EXPECT_LT(0, header.read(&bl));
+    bl.append_zero(header.get_data_offset() - bl.length());
+    return std::string(bl.c_str(), bl.length());
   }
 
   // lists the keyslots the way util::luks_keyslot_list() does
@@ -618,6 +655,148 @@ TEST_F(TestMockCryptoLuksUpdateHeaderRequest, NotLuks) {
   int keyslot = -1;
   ASSERT_EQ(-EINVAL, get_volume_key(passphrase, &key, &keyslot));
   ASSERT_TRUE(key.empty());
+
+  std::string dump;
+  ASSERT_EQ(-EINVAL, header_dump(&dump));
+  ASSERT_TRUE(dump.empty());
+}
+
+// a dump taken before an add brings the header back to that state
+TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, HeaderDumpAndRestore) {
+  generate_header(GetParam(), sector_size());
+
+  std::string dump;
+  size_t dump_size = 0;
+  ASSERT_EQ(0, header_dump(&dump, &dump_size));
+  // the whole header area, starting with the LUKS magic
+  ASSERT_EQ(image_bl.length(), dump.size());
+  ASSERT_EQ(dump.size(), dump_size);
+  ceph::bufferlist dump_bl;
+  dump_bl.append(dump);
+  ASSERT_LT(0, Magic::is_luks(dump_bl));
+  ASSERT_TRUE(writes.empty());
+  ASSERT_EQ(0u, flushes);
+
+  int added = -1;
+  ASSERT_EQ(0, add_keyslot(RBD_ENCRYPTION_LUKS_ANY_KEYSLOT, volume_key,
+                           new_passphrase, &added));
+  ASSERT_EQ(0, unlock_luks(new_passphrase));
+
+  ASSERT_EQ(0, header_restore(dump));
+  // one write of the dump at offset 0, then a flush
+  ASSERT_EQ(1u, writes.size());
+  ASSERT_EQ(0u, writes[0].first);
+  ASSERT_EQ(dump.size(), writes[0].second);
+  ASSERT_EQ(1u, flushes);
+  ASSERT_EQ((std::vector<int>{0}), listed_slots());
+  ASSERT_EQ(0, unlock_luks(passphrase));
+  ASSERT_GT(0, unlock_luks(new_passphrase));
+}
+
+// a header no client can read any more is replaced without conditions
+TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, HeaderRestoreTorn) {
+  generate_header(GetParam(), sector_size());
+  std::string dump;
+  ASSERT_EQ(0, header_dump(&dump));
+
+  // both LUKS2 metadata copies and the LUKS1 record lie in the first 64 KiB
+  ceph::bufferlist zeros;
+  zeros.append_zero(64 * 1024);
+  store_write(0, zeros);
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
+  ASSERT_EQ(-EINVAL, list_keyslots(&keyslots));
+
+  ASSERT_EQ(0, header_restore(dump));
+  ASSERT_EQ((std::vector<int>{0}), listed_slots());
+  ASSERT_EQ(0, unlock_luks(passphrase));
+}
+
+// libcryptsetup refuses a dump whose data offset differs from the header
+// on the image while that header still loads
+TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion,
+       HeaderRestoreRefusesOtherDataOffset) {
+  generate_header(GetParam(), sector_size());
+  ceph::bufferlist before = image_bl;
+
+  std::string other = other_header_dump(GetParam(), sector_size());
+  ASSERT_NE(image_bl.length(), other.size());
+  ASSERT_GT(0, header_restore(other));
+  ASSERT_TRUE(writes.empty());
+  ASSERT_TRUE(before.contents_equal(image_bl));
+}
+
+// a dump of a clone carries the LUKS magic, and a restore puts the RBD
+// clone magic back on the image
+TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, HeaderDumpOfClone) {
+  generate_header(GetParam(), sector_size(), true);
+  ASSERT_LT(0, Magic::is_rbd_clone(image_bl));
+
+  std::string dump;
+  ASSERT_EQ(0, header_dump(&dump));
+  ceph::bufferlist dump_bl;
+  dump_bl.append(dump);
+  ASSERT_LT(0, Magic::is_luks(dump_bl));
+
+  int added = -1;
+  ASSERT_EQ(0, add_keyslot(RBD_ENCRYPTION_LUKS_ANY_KEYSLOT, volume_key,
+                           new_passphrase, &added));
+  ASSERT_EQ(0, header_restore(dump));
+  ASSERT_LT(0, Magic::is_rbd_clone(image_bl));
+  ASSERT_EQ(0, Magic::is_luks(image_bl));
+  ASSERT_EQ((std::vector<int>{0}), listed_slots());
+  ASSERT_EQ(0, unlock_luks(passphrase));
+}
+
+// restore puts back the magic the stored bytes carried: a clone whose own
+// header has the LUKS magic keeps it, and a clone whose header lost its
+// magic gets the RBD clone magic, as format gives it
+TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion,
+       HeaderRestoreMagicOnClone) {
+  generate_header(GetParam(), sector_size());
+  mock_parent_image_ctx = new MockImageCtx(*ictx);
+  mock_image_ctx->parent = mock_parent_image_ctx;
+  std::string dump;
+  ASSERT_EQ(0, header_dump(&dump));
+
+  // the stored magic stays what it was
+  ASSERT_EQ(0, header_restore(dump));
+  ASSERT_LT(0, Magic::is_luks(image_bl));
+  ASSERT_EQ((std::vector<int>{0}), listed_slots());
+
+  // the magic gone: the parent decides
+  ceph::bufferlist zeros;
+  zeros.append_zero(64 * 1024);
+  store_write(0, zeros);
+  ASSERT_EQ(0, header_restore(dump));
+  ASSERT_LT(0, Magic::is_rbd_clone(image_bl));
+  ASSERT_EQ((std::vector<int>{0}), listed_slots());
+  ASSERT_EQ(0, unlock_luks(passphrase));
+}
+
+// the dump's size is reported before anything is copied; a dump works on
+// a read-only handle and a snapshot, a restore refuses them
+TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion,
+       HeaderDumpSizeAndReadOnly) {
+  generate_header(GetParam(), sector_size());
+
+  std::string dump;
+  size_t dump_size = 0;
+  ASSERT_EQ(-ERANGE, header_dump(&dump, &dump_size, 0));
+  ASSERT_EQ(image_bl.length(), dump_size);
+  ASSERT_TRUE(dump.empty());
+
+  mock_image_ctx->read_only = true;
+  ASSERT_EQ(0, header_dump(&dump));
+  ASSERT_EQ(image_bl.length(), dump.size());
+  ASSERT_EQ(-EROFS, header_restore(dump));
+  ASSERT_TRUE(read_requests.empty());
+
+  mock_image_ctx->snap_id = 1;
+  dump.clear();
+  ASSERT_EQ(0, header_dump(&dump));
+  ASSERT_EQ(image_bl.length(), dump.size());
+  ASSERT_EQ(-EROFS, header_restore(dump));
+  ASSERT_TRUE(writes.empty());
 }
 
 TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, GetVolumeKey) {

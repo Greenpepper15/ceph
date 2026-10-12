@@ -975,13 +975,15 @@ CEPH_RBD_API int rbd_encryption_load2(rbd_image_t image,
  * a failed call may have changed the header in part. The caller holds the
  * volume key for a rotation and repairs any state with the primitives:
  *
- *   1. rbd_encryption_luks_volume_key_get(), the key kept, wrapped, until
+ *   1. rbd_encryption_luks_header_dump(), the dump kept until the end;
+ *   2. rbd_encryption_luks_volume_key_get(), the key kept, wrapped, until
  *      the end;
- *   2. rbd_encryption_luks_keyslot_add() with the key and the new
+ *   3. rbd_encryption_luks_keyslot_add() with the key and the new
  *      passphrase, then proven the caller's way: a load with the new
  *      passphrase, or the listing and a retry;
- *   3. rbd_encryption_luks_keyslot_remove() of the old keyslot;
- *   4. rbd_encryption_luks_keyslot_list(), then the key deleted.
+ *   4. rbd_encryption_luks_keyslot_remove() of the old keyslot;
+ *   5. rbd_encryption_luks_keyslot_list(), then the dump and the key
+ *      deleted.
  *
  * What a write-back guarantees: the changed 4 KiB ranges of the header are
  * written one at a time in ascending offset order, each acknowledged by
@@ -994,11 +996,12 @@ CEPH_RBD_API int rbd_encryption_load2(rbd_image_t image,
  * metadata no longer lists, which is unusable without the salt and KDF
  * settings that lived in that metadata; and, when both LUKS2 metadata
  * copies or the LUKS1 record were hit, a header that no longer loads,
- * which only a copy of the header taken beforehand brings back. The
- * volume key never changes; it opens the image without any passphrase, so
- * the caller protects it like the passphrases. Callers must serialize
- * header updates. Every *_size argument must be sizeof() of its struct;
- * new fields would come with new calls.
+ * which rbd_encryption_luks_header_restore() and the dump bring back, and
+ * the rotation starts over. The volume key never changes; it opens the
+ * image without any passphrase, so the caller protects it and the dump
+ * like the passphrases. Callers must serialize header updates. Every *_size
+ * argument must be sizeof() of its struct; new fields would come with new
+ * calls.
  */
 
 /*
@@ -1052,6 +1055,31 @@ CEPH_RBD_API int rbd_encryption_luks_keyslot_list(
 CEPH_RBD_API int rbd_encryption_luks_keyslot_list_cleanup(
     rbd_encryption_luks_keyslot_info_t *keyslots, size_t keyslot_info_size,
     size_t num_keyslots);
+/*
+ * Copy the LUKS header out of the image into a caller buffer of
+ * *dump_size bytes: the bytes up to the data offset as the image stores
+ * them, with the LUKS magic even on a clone, so that cryptsetup can read
+ * the dump.  On success *dump_size is the dump's size.  If the buffer is
+ * too small, -ERANGE is returned and *dump_size is the size needed; dump
+ * may be NULL only with *dump_size 0.  A dump holds every keyslot in use
+ * when it was taken, so it is as sensitive as the header and keeps those
+ * passphrases valid when restored.
+ */
+CEPH_RBD_API int rbd_encryption_luks_header_dump(rbd_image_t image,
+                                                 char *dump,
+                                                 size_t *dump_size);
+/*
+ * Write a header dump back to the image, whole, through libcryptsetup's
+ * own restore, whose checks apply and nothing else: the dump must be a
+ * valid LUKS header, and while the image's header still loads its data
+ * offset must match.  A header that no longer loads is replaced without
+ * conditions.  On a clone the RBD clone magic is re-applied.  A read-only
+ * handle or a snapshot is -EROFS, an empty dump or one larger than the
+ * image -EINVAL.
+ */
+CEPH_RBD_API int rbd_encryption_luks_header_restore(rbd_image_t image,
+                                                    const char *dump,
+                                                    size_t dump_size);
 
 /* snapshots */
 CEPH_RBD_API int rbd_snap_list(rbd_image_t image, rbd_snap_info_t *snaps,

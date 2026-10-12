@@ -5761,6 +5761,63 @@ written." % (self.name, ret, length))
         finally:
             free(_keyslots)
 
+    @requires_not_closed
+    def encryption_luks_header_dump(self):
+        """
+        Copy the LUKS header out of the image: the bytes up to the data
+        offset, with the LUKS magic even on a clone, so that cryptsetup can
+        read the dump.
+
+        A dump holds every keyslot in use when it was taken, so it is as
+        sensitive as the header and keeps those passphrases valid when it
+        is restored.
+
+        :returns: bytes - the header dump
+        """
+        cdef:
+            char* _dump = NULL
+            size_t _size = 0
+            int ret
+        try:
+            while True:
+                with nogil:
+                    ret = rbd_encryption_luks_header_dump(self.image, _dump,
+                                                          &_size)
+                if ret != -errno.ERANGE:
+                    break
+                _dump = <char *>realloc_chk(_dump, _size)
+            if ret != 0:
+                raise make_ex(
+                    ret,
+                    'error dumping the LUKS header of image %s' % self.name,
+                    group_errno_to_exception)
+            return _dump[:_size]
+        finally:
+            free(_dump)
+
+    @requires_not_closed
+    def encryption_luks_header_restore(self, dump):
+        """
+        Write a header dump back to the image, whole, with libcryptsetup's
+        own checks: the dump must be a valid LUKS header, and while the
+        image's header still loads its data offset must match.
+
+        :param dump: the header dump, as returned by
+                     encryption_luks_header_dump
+        :type dump: bytes
+        """
+        dump = cstr(dump, "dump")
+        cdef:
+            char* _dump = dump
+            size_t _size = len(dump)
+            int ret
+        with nogil:
+            ret = rbd_encryption_luks_header_restore(self.image, _dump, _size)
+        if ret != 0:
+            raise make_ex(
+                ret, 'error restoring the LUKS header of image %s' % self.name,
+                group_errno_to_exception)
+
 
 cdef class ImageIterator(object):
     """

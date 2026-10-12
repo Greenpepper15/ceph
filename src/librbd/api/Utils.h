@@ -37,6 +37,12 @@ template <typename ImageCtxT = librbd::ImageCtx>
 void luks_keyslot_list(
     ImageCtxT* ictx, std::vector<encryption_luks_keyslot_info_t>* keyslots,
     Context* on_finish);
+template <typename ImageCtxT = librbd::ImageCtx>
+void luks_header_dump(ImageCtxT* ictx, size_t max_size, std::string* dump,
+                      size_t* dump_size, Context* on_finish);
+template <typename ImageCtxT = librbd::ImageCtx>
+void luks_header_restore(ImageCtxT* ictx, std::string_view dump,
+                         Context* on_finish);
 
 } // namespace util
 } // namespace api

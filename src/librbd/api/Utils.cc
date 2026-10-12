@@ -6,6 +6,8 @@
 
 #if defined(HAVE_LIBCRYPTSETUP)
 #include "librbd/crypto/luks/GetVolumeKeyRequest.h"
+#include "librbd/crypto/luks/HeaderBackupRequest.h"
+#include "librbd/crypto/luks/HeaderRestoreRequest.h"
 #include "librbd/crypto/luks/LUKSEncryptionFormat.h"
 #include "librbd/crypto/luks/ReadHeaderRequest.h"
 #include "librbd/crypto/luks/UpdateHeaderRequest.h"
@@ -273,6 +275,31 @@ void luks_keyslot_list(
 #endif
 }
 
+template <typename I>
+void luks_header_dump(I* ictx, size_t max_size, std::string* dump,
+                      size_t* dump_size, Context* on_finish) {
+#if defined(HAVE_LIBCRYPTSETUP)
+  auto req = crypto::luks::HeaderBackupRequest<I>::create(
+          ictx, max_size, dump, dump_size, on_finish);
+  req->send();
+#else
+  lderr(ictx->cct) << "LUKS keyslots require libcryptsetup" << dendl;
+  on_finish->complete(-ENOTSUP);
+#endif
+}
+
+template <typename I>
+void luks_header_restore(I* ictx, std::string_view dump, Context* on_finish) {
+#if defined(HAVE_LIBCRYPTSETUP)
+  auto req = crypto::luks::HeaderRestoreRequest<I>::create(ictx, dump,
+                                                           on_finish);
+  req->send();
+#else
+  lderr(ictx->cct) << "LUKS keyslots require libcryptsetup" << dendl;
+  on_finish->complete(-ENOTSUP);
+#endif
+}
+
 } // namespace util
 } // namespace api
 } // namespace librbd
@@ -295,3 +322,8 @@ template void librbd::api::util::luks_keyslot_list(
     librbd::ImageCtx* ictx,
     std::vector<encryption_luks_keyslot_info_t>* keyslots,
     Context* on_finish);
+template void librbd::api::util::luks_header_dump(
+    librbd::ImageCtx* ictx, size_t max_size, std::string* dump,
+    size_t* dump_size, Context* on_finish);
+template void librbd::api::util::luks_header_restore(
+    librbd::ImageCtx* ictx, std::string_view dump, Context* on_finish);

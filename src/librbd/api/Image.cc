@@ -1051,6 +1051,22 @@ int Image<I>::encryption_luks_keyslot_list(
   return cond.wait();
 }
 
+template <typename I>
+int Image<I>::encryption_luks_header_dump(I* ictx, size_t max_size,
+                                          std::string* dump,
+                                          size_t* dump_size) {
+  C_SaferCond cond;
+  util::luks_header_dump(ictx, max_size, dump, dump_size, &cond);
+  return cond.wait();
+}
+
+template <typename I>
+int Image<I>::encryption_luks_header_restore(I* ictx, std::string_view dump) {
+  C_SaferCond cond;
+  util::luks_header_restore(ictx, dump, &cond);
+  return cond.wait();
+}
+
 } // namespace api
 } // namespace librbd
 

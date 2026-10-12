@@ -830,3 +830,7 @@ cdef extern from "rbd/librbd.h" nogil:
     int rbd_encryption_luks_keyslot_list_cleanup(
         rbd_encryption_luks_keyslot_info_t *keyslots, size_t keyslot_info_size,
         size_t num_keyslots)
+    int rbd_encryption_luks_header_dump(rbd_image_t image, char *dump,
+                                        size_t *dump_size)
+    int rbd_encryption_luks_header_restore(rbd_image_t image,
+                                           const char *dump, size_t dump_size)
