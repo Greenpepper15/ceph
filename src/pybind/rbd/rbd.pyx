@@ -183,6 +183,7 @@ RBD_ENCRYPTION_FORMAT_LUKS2 = _RBD_ENCRYPTION_FORMAT_LUKS2
 RBD_ENCRYPTION_FORMAT_LUKS = _RBD_ENCRYPTION_FORMAT_LUKS
 RBD_ENCRYPTION_ALGORITHM_AES128 = _RBD_ENCRYPTION_ALGORITHM_AES128
 RBD_ENCRYPTION_ALGORITHM_AES256 = _RBD_ENCRYPTION_ALGORITHM_AES256
+RBD_ENCRYPTION_LUKS_ANY_KEYSLOT = _RBD_ENCRYPTION_LUKS_ANY_KEYSLOT
 
 RBD_WRITE_ZEROES_FLAG_THICK_PROVISION = _RBD_WRITE_ZEROES_FLAG_THICK_PROVISION
 
@@ -5584,6 +5585,129 @@ written." % (self.name, ret, length))
                 if _specs[i].opts != NULL:
                     free(_specs[i].opts)
             free(_specs)
+
+    @requires_not_closed
+    def encryption_luks_keyslot_add(self, volume_key, passphrase,
+                                    keyslot=RBD_ENCRYPTION_LUKS_ANY_KEYSLOT,
+                                    kdf=None, hash=None, kdf_iterations=0,
+                                    kdf_memory_kb=0, kdf_threads=0):
+        """
+        Add a LUKS keyslot that stores volume_key and unlocks with
+        passphrase.
+
+        Without kdf, the new keyslot copies the key derivation settings of
+        the lowest keyslot in use. With kdf, the other settings are used as
+        given.
+
+        :param volume_key: the key the data is encrypted with, as returned
+                           by encryption_luks_volume_key_get
+        :type volume_key: bytes
+        :param passphrase: passphrase for the new keyslot
+        :type passphrase: str or bytes
+        :param keyslot: keyslot to use, or RBD_ENCRYPTION_LUKS_ANY_KEYSLOT
+        :type keyslot: int
+        :param kdf: key derivation function: pbkdf2, argon2i or argon2id
+        :type kdf: str
+        :param hash: hash, needed for pbkdf2
+        :type hash: str
+        :param kdf_iterations: iterations, the time cost for argon2
+        :type kdf_iterations: int
+        :param kdf_memory_kb: memory cost in KiB, argon2 only
+        :type kdf_memory_kb: int
+        :param kdf_threads: threads, argon2 only
+        :type kdf_threads: int
+        :returns: int - the keyslot that was added
+        """
+        volume_key = cstr(volume_key, "volume_key")
+        passphrase = cstr(passphrase, "passphrase")
+        kdf = cstr(kdf, "kdf", opt=True)
+        hash = cstr(hash, "hash", opt=True)
+        cdef rbd_encryption_luks_keyslot_add_options_t _opts
+        cdef char* _volume_key = volume_key
+        cdef char* _passphrase = passphrase
+        cdef char* _kdf = opt_str(kdf)
+        cdef char* _hash = opt_str(hash)
+        _opts.keyslot = keyslot
+        _opts.volume_key = _volume_key
+        _opts.volume_key_size = len(volume_key)
+        _opts.passphrase = _passphrase
+        _opts.passphrase_size = len(passphrase)
+        _opts.kdf = _kdf
+        _opts.hash = _hash
+        _opts.kdf_iterations = kdf_iterations
+        _opts.kdf_memory_kb = kdf_memory_kb
+        _opts.kdf_threads = kdf_threads
+        with nogil:
+            ret = rbd_encryption_luks_keyslot_add(self.image, &_opts,
+                                                  sizeof(_opts))
+        if ret < 0:
+            raise make_ex(ret, 'error adding keyslot to image %s' % self.name,
+                          group_errno_to_exception)
+        return ret
+
+    @requires_not_closed
+    def encryption_luks_keyslot_remove(self, keyslot):
+        """
+        Remove a LUKS keyslot. The last keyslot bound to the data cannot be
+        removed.
+
+        :param keyslot: keyslot to remove
+        :type keyslot: int
+        """
+        cdef rbd_encryption_luks_keyslot_remove_options_t _opts
+        _opts.keyslot = keyslot
+        with nogil:
+            ret = rbd_encryption_luks_keyslot_remove(self.image, &_opts,
+                                                     sizeof(_opts))
+        if ret != 0:
+            raise make_ex(
+                ret, 'error removing keyslot from image %s' % self.name,
+                group_errno_to_exception)
+
+    @requires_not_closed
+    def encryption_luks_volume_key_get(self, passphrase):
+        """
+        Get the volume key, the key the data is encrypted with, through the
+        keyslot that passphrase unlocks.
+
+        The key opens the image without any passphrase: protect it like the
+        passphrases, and keep it only as long as a rotation needs it.
+
+        :param passphrase: passphrase that unlocks a keyslot
+        :type passphrase: str or bytes
+        :returns: tuple - the volume key as bytes, and the keyslot it opened
+        """
+        passphrase = cstr(passphrase, "passphrase")
+        cdef:
+            rbd_encryption_luks_volume_key_get_options_t _opts
+            char* _passphrase = passphrase
+            char* _key = NULL
+            size_t _size = 0
+            size_t i
+            int _keyslot = -1
+            int ret
+        _opts.passphrase = _passphrase
+        _opts.passphrase_size = len(passphrase)
+        try:
+            # the first call only reports the size, without a derivation
+            while True:
+                with nogil:
+                    ret = rbd_encryption_luks_volume_key_get(
+                        self.image, &_opts, sizeof(_opts), _key, &_size,
+                        &_keyslot)
+                if ret != -errno.ERANGE:
+                    break
+                _key = <char *>realloc_chk(_key, _size)
+            if ret != 0:
+                raise make_ex(
+                    ret, 'error getting the volume key of image %s' % self.name,
+                    group_errno_to_exception)
+            return (_key[:_size], _keyslot)
+        finally:
+            if _key != NULL:
+                for i in range(_size):
+                    _key[i] = 0
+            free(_key)
 
 
 cdef class ImageIterator(object):

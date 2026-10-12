@@ -64,6 +64,8 @@ cdef nogil:
 
         _RBD_WRITE_ZEROES_FLAG_THICK_PROVISION "RBD_WRITE_ZEROES_FLAG_THICK_PROVISION"
 
+        _RBD_ENCRYPTION_LUKS_ANY_KEYSLOT "RBD_ENCRYPTION_LUKS_ANY_KEYSLOT"
+
         _RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT "RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT"
         _RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT "RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT"
 
@@ -324,6 +326,25 @@ cdef nogil:
         rbd_encryption_format_t format
         rbd_encryption_options_t opts
         size_t opts_size
+
+    ctypedef struct rbd_encryption_luks_keyslot_add_options_t:
+        int keyslot
+        const char* volume_key
+        size_t volume_key_size
+        const char* passphrase
+        size_t passphrase_size
+        const char* kdf
+        const char* hash
+        uint32_t kdf_iterations
+        uint32_t kdf_memory_kb
+        uint32_t kdf_threads
+
+    ctypedef struct rbd_encryption_luks_keyslot_remove_options_t:
+        int keyslot
+
+    ctypedef struct rbd_encryption_luks_volume_key_get_options_t:
+        const char* passphrase
+        size_t passphrase_size
 
     void rbd_version(int *major, int *minor, int *extra):
         pass
@@ -981,4 +1002,20 @@ cdef nogil:
     int rbd_encryption_load2(rbd_image_t image,
                              const rbd_encryption_spec_t *specs,
                              size_t spec_count):
+        pass
+    int rbd_encryption_luks_keyslot_add(
+        rbd_image_t image,
+        const rbd_encryption_luks_keyslot_add_options_t *opts,
+        size_t opts_size):
+        pass
+    int rbd_encryption_luks_keyslot_remove(
+        rbd_image_t image,
+        const rbd_encryption_luks_keyslot_remove_options_t *opts,
+        size_t opts_size):
+        pass
+    int rbd_encryption_luks_volume_key_get(
+            rbd_image_t image,
+            const rbd_encryption_luks_volume_key_get_options_t *opts,
+            size_t opts_size, char *volume_key, size_t *volume_key_size,
+            int *keyslot):
         pass
