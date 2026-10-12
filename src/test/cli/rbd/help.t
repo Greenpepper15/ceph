@@ -40,6 +40,7 @@
       encryption format                 Format image to an encrypted format.
       encryption keyslot add            Add a LUKS keyslot that stores the volume
                                         key under a passphrase.
+      encryption keyslot list (... ls)  List the LUKS keyslots in use.
       encryption keyslot remove (... rm)
                                         Remove a LUKS keyslot.
       encryption volume-key get         Write the volume key of a LUKS image to a
@@ -819,6 +820,25 @@
     --pbkdf-force-iterations arg iterations, the time cost for argon2
     --pbkdf-memory arg           argon2 memory cost in KiB
     --pbkdf-parallel arg         argon2 threads
+  
+  rbd help encryption keyslot list
+  usage: rbd encryption keyslot list [--pool <pool>] [--namespace <namespace>] 
+                                     [--image <image>] [--format <format>] 
+                                     [--pretty-format] 
+                                     <image-spec> 
+  
+  List the LUKS keyslots in use.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+    --format arg         output format (plain, json, or xml) [default: plain]
+    --pretty-format      pretty formatting (json and xml)
   
   rbd help encryption keyslot remove
   usage: rbd encryption keyslot remove [--pool <pool>] [--namespace <namespace>] 

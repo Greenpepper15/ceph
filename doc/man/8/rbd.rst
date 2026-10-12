@@ -319,6 +319,10 @@ Commands
   lowest keyslot in use, unless --pbkdf sets them: *pbkdf2*, *argon2i* or
   *argon2id*, with the other options used as given.
 
+:command:`encryption keyslot list` *image-spec*
+  Lists the LUKS keyslots in use with their key size and key derivation
+  parameters. No passphrase is needed.
+
 :command:`encryption keyslot remove` --keyslot *n* *image-spec*
   Removes a LUKS keyslot. The last keyslot bound to the data cannot be
   removed.

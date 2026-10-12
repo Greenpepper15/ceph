@@ -3,11 +3,15 @@
 
 #include "include/compat.h"
 #include "include/scope_guard.h"
+#include "include/stringify.h"
+#include "include/types.h" // for byte_u_t
 #include "tools/rbd/ArgumentTypes.h"
 #include "tools/rbd/Shell.h"
 #include "tools/rbd/Utils.h"
 #include "common/errno.h"
+#include "common/Formatter.h"
 #include "common/safe_io.h"
+#include "common/TextTable.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -320,6 +324,99 @@ Shell::Action action_keyslot_remove(
   {"encryption", "keyslot", "remove"},
   {"encryption", "keyslot", "rm"}, "Remove a LUKS keyslot.", "",
   &get_keyslot_remove_arguments, &execute_keyslot_remove);
+
+void get_keyslot_list_arguments(po::options_description *positional,
+                                po::options_description *options) {
+  at::add_image_spec_options(positional, options, at::ARGUMENT_MODIFIER_NONE);
+  at::add_format_options(options);
+}
+
+int execute_keyslot_list(const po::variables_map &vm,
+                         const std::vector<std::string> &ceph_global_init_args) {
+  size_t arg_index = 0;
+  std::string pool_name;
+  std::string namespace_name;
+  std::string image_name;
+  std::string snap_name;
+  int r = utils::get_pool_image_snapshot_names(
+    vm, at::ARGUMENT_MODIFIER_NONE, &arg_index, &pool_name, &namespace_name,
+    &image_name, &snap_name, true, utils::SNAPSHOT_PRESENCE_NONE,
+    utils::SPEC_VALIDATION_NONE);
+  if (r < 0) {
+    return r;
+  }
+
+  at::Format::Formatter formatter;
+  r = utils::get_formatter(vm, &formatter);
+  if (r < 0) {
+    return r;
+  }
+
+  librados::Rados rados;
+  librados::IoCtx io_ctx;
+  librbd::Image image;
+  r = utils::init_and_open_image(pool_name, namespace_name, image_name, "", "",
+                                 true, &rados, &io_ctx, &image);
+  if (r < 0) {
+    return r;
+  }
+
+  std::vector<librbd::encryption_luks_keyslot_info_t> keyslots;
+  r = image.encryption_luks_keyslot_list(
+      &keyslots, sizeof(librbd::encryption_luks_keyslot_info_t));
+  if (r < 0) {
+    std::cerr << "rbd: encryption keyslot list error: " << cpp_strerror(r)
+              << std::endl;
+    return r;
+  }
+
+  ceph::Formatter *f = formatter.get();
+  if (f) {
+    f->open_array_section("keyslots");
+    for (auto& k : keyslots) {
+      f->open_object_section("keyslot");
+      f->dump_int("keyslot", k.keyslot);
+      f->dump_bool("last", k.last);
+      f->dump_unsigned("key_size", k.key_size);
+      f->dump_string("kdf", k.kdf);
+      f->dump_string("hash", k.hash);
+      f->dump_unsigned("kdf_iterations", k.kdf_iterations);
+      f->dump_unsigned("kdf_memory_kb", k.kdf_memory_kb);
+      f->dump_unsigned("kdf_threads", k.kdf_threads);
+      f->close_section();
+    }
+    f->close_section();
+    f->flush(std::cout);
+    return 0;
+  }
+
+  TextTable t;
+  t.define_column("KEYSLOT", TextTable::LEFT, TextTable::RIGHT);
+  t.define_column("LAST", TextTable::LEFT, TextTable::LEFT);
+  t.define_column("KEY SIZE", TextTable::LEFT, TextTable::RIGHT);
+  t.define_column("KDF", TextTable::LEFT, TextTable::LEFT);
+  t.define_column("HASH", TextTable::LEFT, TextTable::LEFT);
+  t.define_column("ITERATIONS", TextTable::LEFT, TextTable::RIGHT);
+  t.define_column("MEMORY", TextTable::LEFT, TextTable::RIGHT);
+  t.define_column("THREADS", TextTable::LEFT, TextTable::RIGHT);
+  for (auto& k : keyslots) {
+    // pbkdf2 has no memory or thread cost, so those stay empty for it
+    t << k.keyslot << (k.last ? "yes" : "")
+      << stringify(byte_u_t(k.key_size)) << k.kdf << k.hash
+      << k.kdf_iterations
+      << (k.kdf_memory_kb != 0 ?
+            stringify(byte_u_t(uint64_t{k.kdf_memory_kb} << 10)) : "")
+      << (k.kdf_threads != 0 ? stringify(k.kdf_threads) : "")
+      << TextTable::endrow;
+  }
+  std::cout << t;
+  return 0;
+}
+
+Shell::Action action_keyslot_list(
+  {"encryption", "keyslot", "list"},
+  {"encryption", "keyslot", "ls"}, "List the LUKS keyslots in use.", "",
+  &get_keyslot_list_arguments, &execute_keyslot_list);
 
 void get_volume_key_get_arguments(po::options_description *positional,
                                   po::options_description *options) {
