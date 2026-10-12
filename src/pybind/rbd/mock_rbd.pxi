@@ -346,6 +346,16 @@ cdef nogil:
         const char* passphrase
         size_t passphrase_size
 
+    ctypedef struct rbd_encryption_luks_keyslot_info_t:
+        int keyslot
+        bint last
+        size_t key_size
+        char *kdf
+        char *hash
+        uint32_t kdf_iterations
+        uint32_t kdf_memory_kb
+        uint32_t kdf_threads
+
     void rbd_version(int *major, int *minor, int *extra):
         pass
     void rbd_image_spec_list_cleanup(rbd_image_spec_t *image, size_t num_images):
@@ -1013,9 +1023,17 @@ cdef nogil:
         const rbd_encryption_luks_keyslot_remove_options_t *opts,
         size_t opts_size):
         pass
+    int rbd_encryption_luks_keyslot_list(
+            rbd_image_t image, rbd_encryption_luks_keyslot_info_t *keyslots,
+            size_t keyslot_info_size, size_t *max_keyslots):
+        pass
     int rbd_encryption_luks_volume_key_get(
             rbd_image_t image,
             const rbd_encryption_luks_volume_key_get_options_t *opts,
             size_t opts_size, char *volume_key, size_t *volume_key_size,
             int *keyslot):
+        pass
+    int rbd_encryption_luks_keyslot_list_cleanup(
+            rbd_encryption_luks_keyslot_info_t *keyslots,
+            size_t keyslot_info_size, size_t num_keyslots):
         pass

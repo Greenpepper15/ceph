@@ -83,6 +83,8 @@ struct Image {
                                          size_t opts_size, bool c_api);
   static int encryption_luks_keyslot_remove(ImageCtxT *ictx, const void *opts,
                                             size_t opts_size, bool c_api);
+  static int encryption_luks_keyslot_list(
+      ImageCtxT *ictx, std::vector<encryption_luks_keyslot_info_t> *keyslots);
 };
 
 } // namespace api

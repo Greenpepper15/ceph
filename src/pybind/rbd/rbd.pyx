@@ -5709,6 +5709,58 @@ written." % (self.name, ret, length))
                     _key[i] = 0
             free(_key)
 
+    @requires_not_closed
+    def encryption_luks_keyslot_list(self):
+        """
+        List the LUKS keyslots in use.
+
+        :returns: list - one dictionary per keyslot, with the keys
+            ``keyslot``, ``last``, ``key_size``, ``kdf``, ``hash``,
+            ``kdf_iterations``, ``kdf_memory_kb`` and ``kdf_threads``
+        """
+        cdef:
+            rbd_encryption_luks_keyslot_info_t *_keyslots = NULL
+            size_t _num_keyslots = 32  # the LUKS2 maximum, so one call fits
+            size_t i
+            int ret
+        try:
+            while True:
+                _keyslots = <rbd_encryption_luks_keyslot_info_t *>realloc_chk(
+                    _keyslots,
+                    _num_keyslots * sizeof(rbd_encryption_luks_keyslot_info_t))
+                with nogil:
+                    ret = rbd_encryption_luks_keyslot_list(
+                        self.image, _keyslots,
+                        sizeof(rbd_encryption_luks_keyslot_info_t),
+                        &_num_keyslots)
+                if ret != -errno.ERANGE:
+                    break
+            if ret != 0:
+                raise make_ex(
+                    ret, 'error listing keyslots of image %s' % self.name,
+                    group_errno_to_exception)
+
+            keyslots = []
+            try:
+                for i in range(_num_keyslots):
+                    keyslots.append({
+                        'keyslot': _keyslots[i].keyslot,
+                        'last': _keyslots[i].last,
+                        'key_size': _keyslots[i].key_size,
+                        'kdf': decode_cstr(_keyslots[i].kdf),
+                        'hash': decode_cstr(_keyslots[i].hash),
+                        'kdf_iterations': _keyslots[i].kdf_iterations,
+                        'kdf_memory_kb': _keyslots[i].kdf_memory_kb,
+                        'kdf_threads': _keyslots[i].kdf_threads,
+                    })
+            finally:
+                rbd_encryption_luks_keyslot_list_cleanup(
+                    _keyslots, sizeof(rbd_encryption_luks_keyslot_info_t),
+                    _num_keyslots)
+            return keyslots
+        finally:
+            free(_keyslots)
+
 
 cdef class ImageIterator(object):
     """

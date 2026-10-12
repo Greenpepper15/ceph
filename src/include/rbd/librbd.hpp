@@ -276,6 +276,17 @@ namespace librbd {
     std::string passphrase;     // unlocks a keyslot
   } encryption_luks_volume_key_get_options_t;
 
+  typedef struct {
+    int keyslot;
+    bool last;
+    size_t key_size;
+    std::string kdf;
+    std::string hash;
+    uint32_t kdf_iterations;
+    uint32_t kdf_memory_kb;
+    uint32_t kdf_threads;
+  } encryption_luks_keyslot_info_t;
+
 class CEPH_RBD_API RBD
 {
 public:
@@ -678,6 +689,9 @@ public:
       const encryption_luks_keyslot_add_options_t *opts, size_t opts_size);
   int encryption_luks_keyslot_remove(
       const encryption_luks_keyslot_remove_options_t *opts, size_t opts_size);
+  int encryption_luks_keyslot_list(
+      std::vector<encryption_luks_keyslot_info_t> *keyslots,
+      size_t keyslot_info_size);
 
   /* striping */
   uint64_t get_stripe_unit() const;

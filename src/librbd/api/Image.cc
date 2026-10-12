@@ -1043,6 +1043,14 @@ int Image<I>::encryption_luks_keyslot_remove(I* ictx, const void* opts,
   return cond.wait();
 }
 
+template <typename I>
+int Image<I>::encryption_luks_keyslot_list(
+    I* ictx, std::vector<encryption_luks_keyslot_info_t> *keyslots) {
+  C_SaferCond cond;
+  util::luks_keyslot_list(ictx, keyslots, &cond);
+  return cond.wait();
+}
+
 } // namespace api
 } // namespace librbd
 

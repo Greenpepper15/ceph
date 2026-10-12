@@ -7,6 +7,7 @@
 #if defined(HAVE_LIBCRYPTSETUP)
 #include "librbd/crypto/luks/GetVolumeKeyRequest.h"
 #include "librbd/crypto/luks/LUKSEncryptionFormat.h"
+#include "librbd/crypto/luks/ReadHeaderRequest.h"
 #include "librbd/crypto/luks/UpdateHeaderRequest.h"
 #endif
 
@@ -245,6 +246,33 @@ void luks_keyslot_remove(I* ictx, const void* opts, size_t opts_size,
 #endif
 }
 
+template <typename I>
+void luks_keyslot_list(
+    I* ictx, std::vector<encryption_luks_keyslot_info_t>* keyslots,
+    Context* on_finish) {
+#if defined(HAVE_LIBCRYPTSETUP)
+  // the metadata only, as image open reads it, and nothing written back:
+  // a repair that libcryptsetup makes to an outdated copy stays in memory
+  auto header = new crypto::luks::Header(ictx->cct);
+  auto ctx = new LambdaContext([header, keyslots, on_finish](int r) {
+      if (r == 0) {
+        r = header->list_keyslots(keyslots);
+      }
+      delete header;
+      on_finish->complete(r);
+    });
+  auto area = ictx->encryption_format ? io::ImageArea::CRYPTO_HEADER :
+                                        io::ImageArea::DATA;
+  auto req = crypto::luks::ReadHeaderRequest<I>::create(
+          ictx, area, RBD_ENCRYPTION_FORMAT_LUKS, false, header, nullptr,
+          nullptr, nullptr, nullptr, ctx);
+  req->send();
+#else
+  lderr(ictx->cct) << "LUKS keyslots require libcryptsetup" << dendl;
+  on_finish->complete(-ENOTSUP);
+#endif
+}
+
 } // namespace util
 } // namespace api
 } // namespace librbd
@@ -262,4 +290,8 @@ template void librbd::api::util::luks_keyslot_add(
     int* result_keyslot, Context* on_finish);
 template void librbd::api::util::luks_keyslot_remove(
     librbd::ImageCtx* ictx, const void* opts, size_t opts_size, bool c_api,
+    Context* on_finish);
+template void librbd::api::util::luks_keyslot_list(
+    librbd::ImageCtx* ictx,
+    std::vector<encryption_luks_keyslot_info_t>* keyslots,
     Context* on_finish);

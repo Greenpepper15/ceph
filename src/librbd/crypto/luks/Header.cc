@@ -321,6 +321,18 @@ int Header::get_keyslot_max() {
   return crypt_keyslot_max(crypt_get_type(m_cd));
 }
 
+int Header::get_keyslot_key_size(int keyslot) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_keyslot_get_key_size(m_cd, keyslot);
+  if (r < 0) {
+    lderr(m_cct) << "crypt_keyslot_get_key_size failed: " << cpp_strerror(r)
+                 << dendl;
+  }
+
+  return r;
+}
+
 int Header::get_keyslot_pbkdf(int keyslot, struct crypt_pbkdf_type* pbkdf) {
   ceph_assert(m_cd != nullptr);
 
@@ -331,6 +343,42 @@ int Header::get_keyslot_pbkdf(int keyslot, struct crypt_pbkdf_type* pbkdf) {
   }
 
   return r;
+}
+
+int Header::list_keyslots(
+        std::vector<encryption_luks_keyslot_info_t>* keyslots) {
+  auto max = get_keyslot_max();
+  if (max <= 0) {
+    lderr(m_cct) << "unexpected keyslot count " << max << dendl;
+    return -EINVAL;
+  }
+
+  keyslots->clear();
+  for (int slot = 0; slot < max; ++slot) {
+    auto status = get_keyslot_status(slot);
+    if (status != CRYPT_SLOT_ACTIVE && status != CRYPT_SLOT_ACTIVE_LAST) {
+      continue;
+    }
+
+    auto key_size = get_keyslot_key_size(slot);
+    if (key_size < 0) {
+      return key_size;
+    }
+    struct crypt_pbkdf_type pbkdf = {};
+    auto r = get_keyslot_pbkdf(slot, &pbkdf);
+    if (r < 0) {
+      return r;
+    }
+
+    keyslots->push_back(
+        {slot, status == CRYPT_SLOT_ACTIVE_LAST,
+         static_cast<size_t>(key_size),
+         pbkdf.type != nullptr ? pbkdf.type : "",
+         pbkdf.hash != nullptr ? pbkdf.hash : "",
+         pbkdf.iterations, pbkdf.max_memory_kb, pbkdf.parallel_threads});
+  }
+
+  return 0;
 }
 
 int Header::get_sector_size() {

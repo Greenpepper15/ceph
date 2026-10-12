@@ -292,20 +292,8 @@ struct TestMockCryptoLuksUpdateHeaderRequest : public TestMockFixture {
     return r;
   }
 
-  // a keyslot in use, read from the header's metadata the way
-  // UpdateHeaderRequest reads it
-  struct KeyslotInfo {
-    int keyslot;
-    bool last;
-    std::string kdf;
-    std::string hash;
-    uint32_t kdf_iterations;
-    uint32_t kdf_memory_kb;
-    uint32_t kdf_threads;
-  };
-
-  // lists the keyslots in use from the metadata, as image open reads it
-  int list_keyslots(std::vector<KeyslotInfo>* keyslots) {
+  // lists the keyslots the way util::luks_keyslot_list() does
+  int list_keyslots(std::vector<encryption_luks_keyslot_info_t>* keyslots) {
     Header header(mock_image_ctx->cct);
     auto r = run([&](Context* ctx) {
       return MockReadHeaderRequest::create(
@@ -315,28 +303,11 @@ struct TestMockCryptoLuksUpdateHeaderRequest : public TestMockFixture {
     if (r < 0) {
       return r;
     }
-    keyslots->clear();
-    for (int slot = 0; slot < header.get_keyslot_max(); ++slot) {
-      auto status = header.get_keyslot_status(slot);
-      if (status != CRYPT_SLOT_ACTIVE && status != CRYPT_SLOT_ACTIVE_LAST) {
-        continue;
-      }
-      struct crypt_pbkdf_type pbkdf = {};
-      r = header.get_keyslot_pbkdf(slot, &pbkdf);
-      if (r < 0) {
-        return r;
-      }
-      keyslots->push_back({slot, status == CRYPT_SLOT_ACTIVE_LAST,
-                           pbkdf.type != nullptr ? pbkdf.type : "",
-                           pbkdf.hash != nullptr ? pbkdf.hash : "",
-                           pbkdf.iterations, pbkdf.max_memory_kb,
-                           pbkdf.parallel_threads});
-    }
-    return 0;
+    return header.list_keyslots(keyslots);
   }
 
   std::vector<int> listed_slots() {
-    std::vector<KeyslotInfo> keyslots;
+    std::vector<encryption_luks_keyslot_info_t> keyslots;
     std::vector<int> slots;
     EXPECT_EQ(0, list_keyslots(&keyslots));
     for (auto& k : keyslots) {
@@ -423,7 +394,7 @@ TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion,
   int added = -1;
   ASSERT_EQ(0, add_keyslot(RBD_ENCRYPTION_LUKS_ANY_KEYSLOT, volume_key,
                            new_passphrase, &added));
-  std::vector<KeyslotInfo> keyslots;
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
   ASSERT_EQ(0, list_keyslots(&keyslots));
   ASSERT_EQ(2u, keyslots.size());
   ASSERT_EQ("pbkdf2", keyslots[1].kdf);
@@ -441,7 +412,7 @@ TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion,
   ASSERT_EQ(0, add_keyslot(RBD_ENCRYPTION_LUKS_ANY_KEYSLOT, volume_key,
                            new_passphrase, &added,
                            KdfSettings{"pbkdf2", "sha256", 2000}));
-  std::vector<KeyslotInfo> keyslots;
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
   ASSERT_EQ(0, list_keyslots(&keyslots));
   ASSERT_EQ(2u, keyslots.size());
   ASSERT_EQ("pbkdf2", keyslots[1].kdf);
@@ -516,7 +487,7 @@ TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, RemoveKeyslot) {
   ASSERT_GT(0, unlock_luks(passphrase));
   ASSERT_EQ(0, unlock_luks(new_passphrase));
 
-  std::vector<KeyslotInfo> keyslots;
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
   ASSERT_EQ(0, list_keyslots(&keyslots));
   ASSERT_EQ(1u, keyslots.size());
   ASSERT_EQ(1, keyslots[0].keyslot);
@@ -545,6 +516,61 @@ TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion,
   ASSERT_TRUE(writes.empty());
 
   ASSERT_TRUE(before.contents_equal(image_bl));
+}
+
+TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, ListKeyslots) {
+  generate_header(GetParam(), sector_size());
+
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
+  ASSERT_EQ(0, list_keyslots(&keyslots));
+  ASSERT_EQ(1u, keyslots.size());
+  ASSERT_EQ(0, keyslots[0].keyslot);
+  ASSERT_TRUE(keyslots[0].last);
+  ASSERT_EQ(64u, keyslots[0].key_size);
+  // generate_header formats in insecure fast mode
+  ASSERT_EQ("pbkdf2", keyslots[0].kdf);
+  ASSERT_EQ("sha256", keyslots[0].hash);
+  ASSERT_EQ(1000u, keyslots[0].kdf_iterations);
+  // one read of the metadata, as image open does it, and no writes
+  ASSERT_TRUE(writes.empty());
+  ASSERT_EQ(0u, flushes);
+  ASSERT_EQ(1u, read_requests.size());
+}
+
+// a crash between the two metadata writes of an update leaves one LUKS2
+// copy outdated. libcryptsetup repairs it when it loads the header, and
+// the listing must not write that repair back
+TEST_F(TestMockCryptoLuksUpdateHeaderRequest, ListKeyslotsLeavesOutdatedCopy) {
+  generate_header(CRYPT_LUKS2, 4096);
+  ceph::bufferlist old_bl = image_bl;
+  int added = -1;
+  ASSERT_EQ(0, add_keyslot(RBD_ENCRYPTION_LUKS_ANY_KEYSLOT, volume_key,
+                           new_passphrase, &added));
+  // the primary copy from before the add, 16 KiB with the default
+  // metadata size
+  ceph::bufferlist primary;
+  primary.substr_of(old_bl, 0, 16384);
+  store_write(0, primary);
+  ceph::bufferlist stored_bl = image_bl;
+
+  Header header(mock_image_ctx->cct);
+  ceph::bufferlist loaded_bl;
+  ASSERT_EQ(0, header.init());
+  ASSERT_EQ(0, header.write(image_bl));
+  ASSERT_EQ(0, header.load(CRYPT_LUKS2));
+  ASSERT_EQ(static_cast<ssize_t>(image_bl.length()),
+            header.read(&loaded_bl, 0, image_bl.length()));
+  ASSERT_FALSE(loaded_bl.contents_equal(image_bl)) << "needs a repair on load";
+
+  // the newer copy wins
+  ASSERT_EQ((std::vector<int>{0, 1}), listed_slots());
+  ASSERT_TRUE(writes.empty());
+  ASSERT_EQ(1u, read_requests.size());
+
+  mock_image_ctx->read_only = true;
+  ASSERT_EQ((std::vector<int>{0, 1}), listed_slots());
+  ASSERT_TRUE(writes.empty());
+  ASSERT_TRUE(stored_bl.contents_equal(image_bl));
 }
 
 TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, ReadOnlyImage) {
@@ -584,7 +610,7 @@ TEST_P(TestMockCryptoLuksUpdateHeaderRequestPerVersion, Snapshot) {
 TEST_F(TestMockCryptoLuksUpdateHeaderRequest, NotLuks) {
   image_bl.append_zero(OBJECT_SIZE);
 
-  std::vector<KeyslotInfo> keyslots;
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
   ASSERT_EQ(-EINVAL, list_keyslots(&keyslots));
   ASSERT_TRUE(writes.empty());
 
@@ -786,7 +812,7 @@ TEST_F(TestMockCryptoLuksUpdateHeaderRequest, AddKeyslotCopiesArgon2Settings) {
   int added = -1;
   ASSERT_EQ(0, add_keyslot(RBD_ENCRYPTION_LUKS_ANY_KEYSLOT, volume_key,
                            new_passphrase, &added));
-  std::vector<KeyslotInfo> keyslots;
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
   ASSERT_EQ(0, list_keyslots(&keyslots));
   ASSERT_EQ(2u, keyslots.size());
   ASSERT_EQ(CRYPT_KDF_ARGON2ID, keyslots[1].kdf);
@@ -803,7 +829,7 @@ TEST_F(TestMockCryptoLuksUpdateHeaderRequest, AddKeyslotWithArgon2Settings) {
   ASSERT_EQ(0, add_keyslot(RBD_ENCRYPTION_LUKS_ANY_KEYSLOT, volume_key,
                            new_passphrase, &added,
                            KdfSettings{CRYPT_KDF_ARGON2ID, "", 4, 64, 1}));
-  std::vector<KeyslotInfo> keyslots;
+  std::vector<encryption_luks_keyslot_info_t> keyslots;
   ASSERT_EQ(0, list_keyslots(&keyslots));
   ASSERT_EQ(2u, keyslots.size());
   ASSERT_EQ("pbkdf2", keyslots[0].kdf);

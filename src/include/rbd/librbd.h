@@ -478,6 +478,18 @@ typedef struct {
 /* let librbd pick the first free LUKS keyslot */
 #define RBD_ENCRYPTION_LUKS_ANY_KEYSLOT (-1)
 
+typedef struct {
+    int keyslot;
+    bool last;                  /* the only keyslot bound to the data, so it
+                                   cannot be removed */
+    size_t key_size;            /* volume key size in bytes */
+    char *kdf;                  /* key derivation, e.g. "argon2id" */
+    char *hash;
+    uint32_t kdf_iterations;    /* for argon2 the time cost */
+    uint32_t kdf_memory_kb;     /* 0 for pbkdf2 */
+    uint32_t kdf_threads;       /* 0 for pbkdf2 */
+} rbd_encryption_luks_keyslot_info_t;
+
 CEPH_RBD_API void rbd_image_options_create(rbd_image_options_t* opts);
 CEPH_RBD_API void rbd_image_options_destroy(rbd_image_options_t opts);
 CEPH_RBD_API int rbd_image_options_set_string(rbd_image_options_t opts,
@@ -967,9 +979,9 @@ CEPH_RBD_API int rbd_encryption_load2(rbd_image_t image,
  *      the end;
  *   2. rbd_encryption_luks_keyslot_add() with the key and the new
  *      passphrase, then proven the caller's way: a load with the new
- *      passphrase, or rbd_encryption_luks_volume_key_get() with it;
- *   3. rbd_encryption_luks_keyslot_remove() of the old keyslot, then the
- *      key deleted.
+ *      passphrase, or the listing and a retry;
+ *   3. rbd_encryption_luks_keyslot_remove() of the old keyslot;
+ *   4. rbd_encryption_luks_keyslot_list(), then the key deleted.
  *
  * What a write-back guarantees: the changed 4 KiB ranges of the header are
  * written one at a time in ascending offset order, each acknowledged by
@@ -977,16 +989,16 @@ CEPH_RBD_API int rbd_encryption_load2(rbd_image_t image,
  * nothing is verified afterwards. The acknowledgement may come from a
  * cache, so only the flush makes the writes durable, and a crash before it
  * can leave any subset of them on the image. Three partial states follow:
- * metadata that lists a keyslot whose key material did not land, which
- * does not open and which remove plus add repair; key material of a
- * keyslot the metadata no longer lists, which is unusable without the salt
- * and KDF settings that lived in that metadata; and, when both LUKS2
- * metadata copies or the LUKS1 record were hit, a header that no longer
- * loads, which only a copy of the header taken beforehand brings back.
- * The volume key never changes; it opens the image without any
- * passphrase, so the caller protects it like the passphrases. Callers
- * must serialize header updates. Every *_size argument must be sizeof()
- * of its struct; new fields would come with new calls.
+ * metadata that lists a keyslot whose key material did not land, which the
+ * listing shows and remove plus add repair; key material of a keyslot the
+ * metadata no longer lists, which is unusable without the salt and KDF
+ * settings that lived in that metadata; and, when both LUKS2 metadata
+ * copies or the LUKS1 record were hit, a header that no longer loads,
+ * which only a copy of the header taken beforehand brings back. The
+ * volume key never changes; it opens the image without any passphrase, so
+ * the caller protects it like the passphrases. Callers must serialize
+ * header updates. Every *_size argument must be sizeof() of its struct;
+ * new fields would come with new calls.
  */
 
 /*
@@ -1025,6 +1037,21 @@ CEPH_RBD_API int rbd_encryption_luks_keyslot_add(
 CEPH_RBD_API int rbd_encryption_luks_keyslot_remove(
     rbd_image_t image, const rbd_encryption_luks_keyslot_remove_options_t *opts,
     size_t opts_size);
+/*
+ * List the keyslots in use into a caller-allocated array with
+ * *max_keyslots entries.  On success, *max_keyslots is set to the number
+ * of entries filled.  If the array is too small, -ERANGE is returned and
+ * *max_keyslots is set to the number needed.  keyslots may be NULL only
+ * with *max_keyslots 0.  The array content is undefined unless the call
+ * returns 0.
+ */
+CEPH_RBD_API int rbd_encryption_luks_keyslot_list(
+    rbd_image_t image, rbd_encryption_luks_keyslot_info_t *keyslots,
+    size_t keyslot_info_size, size_t *max_keyslots);
+/* frees only the strings; the array stays with the caller */
+CEPH_RBD_API int rbd_encryption_luks_keyslot_list_cleanup(
+    rbd_encryption_luks_keyslot_info_t *keyslots, size_t keyslot_info_size,
+    size_t num_keyslots);
 
 /* snapshots */
 CEPH_RBD_API int rbd_snap_list(rbd_image_t image, rbd_snap_info_t *snaps,

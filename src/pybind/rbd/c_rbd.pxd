@@ -340,6 +340,16 @@ cdef extern from "rbd/librbd.h" nogil:
         const char* passphrase
         size_t passphrase_size
 
+    ctypedef struct rbd_encryption_luks_keyslot_info_t:
+        int keyslot
+        bint last
+        size_t key_size
+        char *kdf
+        char *hash
+        uint32_t kdf_iterations
+        uint32_t kdf_memory_kb
+        uint32_t kdf_threads
+
     ctypedef void (*rbd_callback_t)(rbd_completion_t cb, void *arg)
 
     void rbd_version(int *major, int *minor, int *extra)
@@ -814,3 +824,9 @@ cdef extern from "rbd/librbd.h" nogil:
         rbd_image_t image,
         const rbd_encryption_luks_keyslot_remove_options_t *opts,
         size_t opts_size)
+    int rbd_encryption_luks_keyslot_list(
+        rbd_image_t image, rbd_encryption_luks_keyslot_info_t *keyslots,
+        size_t keyslot_info_size, size_t *max_keyslots)
+    int rbd_encryption_luks_keyslot_list_cleanup(
+        rbd_encryption_luks_keyslot_info_t *keyslots, size_t keyslot_info_size,
+        size_t num_keyslots)

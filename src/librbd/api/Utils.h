@@ -8,6 +8,7 @@
 #include "include/rbd/librbd.hpp"
 #include "librbd/ImageCtx.h"
 #include "librbd/crypto/EncryptionFormat.h"
+#include <vector>
 
 namespace librbd {
 
@@ -32,6 +33,10 @@ void luks_keyslot_add(ImageCtxT* ictx, const void* opts, size_t opts_size,
 template <typename ImageCtxT = librbd::ImageCtx>
 void luks_keyslot_remove(ImageCtxT* ictx, const void* opts, size_t opts_size,
                          bool c_api, Context* on_finish);
+template <typename ImageCtxT = librbd::ImageCtx>
+void luks_keyslot_list(
+    ImageCtxT* ictx, std::vector<encryption_luks_keyslot_info_t>* keyslots,
+    Context* on_finish);
 
 } // namespace util
 } // namespace api
