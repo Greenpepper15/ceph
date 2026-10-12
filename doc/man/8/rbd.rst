@@ -333,6 +333,17 @@ Commands
   readable by its owner only, and prints the keyslot it opened. The key
   opens the image without any passphrase.
 
+:command:`encryption header dump` *image-spec* *dump-file*
+  Writes the LUKS header of an image, the bytes up to the data offset, to
+  *dump-file*, readable by its owner only. On a clone the RBD clone magic
+  is replaced by the LUKS magic, so that cryptsetup can read the file. A
+  dump holds every keyslot in use when it was taken.
+
+:command:`encryption header restore` *image-spec* *dump-file*
+  Writes a header dump back to the image, whole, with libcryptsetup's own
+  checks: the dump has to be a valid LUKS header, and while the image's
+  header still loads, the data offsets have to match.
+
 :command:`export` [--export-format *format (1 or 2)*] (*image-spec* | *snap-spec*) [*dest-path*]
   Export image to dest path (use - for stdout).
   The --export-format accepts '1' or '2' currently. Format 2 allow us to export not only the content

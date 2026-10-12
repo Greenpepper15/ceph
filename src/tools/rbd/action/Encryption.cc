@@ -504,6 +504,121 @@ Shell::Action action_volume_key_get(
   "Write the volume key of a LUKS image to a file.", "",
   &get_volume_key_get_arguments, &execute_volume_key_get);
 
+void get_header_dump_arguments(po::options_description *positional,
+                               po::options_description *options) {
+  at::add_image_spec_options(positional, options, at::ARGUMENT_MODIFIER_NONE);
+  positional->add_options()
+    ("dump-file",
+     "path of the file to write the LUKS header to, readable by its owner "
+     "only");
+}
+
+int execute_header_dump(const po::variables_map &vm,
+                        const std::vector<std::string> &ceph_global_init_args) {
+  size_t arg_index = 0;
+  std::string pool_name;
+  std::string namespace_name;
+  std::string image_name;
+  std::string snap_name;
+  int r = utils::get_pool_image_snapshot_names(
+    vm, at::ARGUMENT_MODIFIER_NONE, &arg_index, &pool_name, &namespace_name,
+    &image_name, &snap_name, true, utils::SNAPSHOT_PRESENCE_NONE,
+    utils::SPEC_VALIDATION_NONE);
+  if (r < 0) {
+    return r;
+  }
+
+  std::string dump_file = utils::get_positional_argument(vm, arg_index++);
+  if (dump_file.empty()) {
+    std::cerr << "rbd: must specify dump-file." << std::endl;
+    return -EINVAL;
+  }
+
+  librados::Rados rados;
+  librados::IoCtx io_ctx;
+  librbd::Image image;
+  r = utils::init_and_open_image(pool_name, namespace_name, image_name, "", "",
+                                 true, &rados, &io_ctx, &image);
+  if (r < 0) {
+    return r;
+  }
+
+  std::string dump;
+  r = image.encryption_luks_header_dump(&dump);
+  if (r < 0) {
+    std::cerr << "rbd: encryption header dump error: " << cpp_strerror(r)
+              << std::endl;
+    return r;
+  }
+
+  // the dump holds every keyslot
+  return write_private_file(dump_file, dump);
+}
+
+Shell::Action action_header_dump(
+  {"encryption", "header", "dump"}, {},
+  "Write the LUKS header of an image to a file.", "",
+  &get_header_dump_arguments, &execute_header_dump);
+
+void get_header_restore_arguments(po::options_description *positional,
+                                  po::options_description *options) {
+  at::add_image_spec_options(positional, options, at::ARGUMENT_MODIFIER_NONE);
+  positional->add_options()
+    ("dump-file", "path of the file written by encryption header dump");
+}
+
+int execute_header_restore(
+    const po::variables_map &vm,
+    const std::vector<std::string> &ceph_global_init_args) {
+  size_t arg_index = 0;
+  std::string pool_name;
+  std::string namespace_name;
+  std::string image_name;
+  std::string snap_name;
+  int r = utils::get_pool_image_snapshot_names(
+    vm, at::ARGUMENT_MODIFIER_NONE, &arg_index, &pool_name, &namespace_name,
+    &image_name, &snap_name, true, utils::SNAPSHOT_PRESENCE_NONE,
+    utils::SPEC_VALIDATION_NONE);
+  if (r < 0) {
+    return r;
+  }
+
+  std::string dump_file = utils::get_positional_argument(vm, arg_index++);
+  if (dump_file.empty()) {
+    std::cerr << "rbd: must specify dump-file." << std::endl;
+    return -EINVAL;
+  }
+
+  std::string dump;
+  r = read_file(dump_file, &dump);
+  if (r < 0) {
+    return r;
+  }
+
+  librados::Rados rados;
+  librados::IoCtx io_ctx;
+  librbd::Image image;
+  r = utils::init_and_open_image(pool_name, namespace_name, image_name, "", "",
+                                 false, &rados, &io_ctx, &image);
+  if (r < 0) {
+    return r;
+  }
+
+  r = image.encryption_luks_header_restore(dump);
+  if (r < 0) {
+    std::cerr << "rbd: encryption header restore error: " << cpp_strerror(r)
+              << std::endl;
+    return r;
+  }
+
+  return 0;
+}
+
+Shell::Action action_header_restore(
+  {"encryption", "header", "restore"}, {},
+  "Write a LUKS header dump back to an image.", "",
+  &get_header_restore_arguments, &execute_header_restore);
+
 } // namespace encryption
 } // namespace action
 } // namespace rbd

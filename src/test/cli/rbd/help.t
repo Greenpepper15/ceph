@@ -38,6 +38,9 @@
       disk-usage (du)                   Show disk usage stats for pool, image or
                                         snapshot.
       encryption format                 Format image to an encrypted format.
+      encryption header dump            Write the LUKS header of an image to a
+                                        file.
+      encryption header restore         Write a LUKS header dump back to an image.
       encryption keyslot add            Add a LUKS keyslot that stores the volume
                                         key under a passphrase.
       encryption keyslot list (... ls)  List the LUKS keyslots in use.
@@ -786,6 +789,41 @@
     --image arg          image name
     --cipher-alg arg     encryption algorithm [possible values: aes-128, aes-256
                          (default)]
+  
+  rbd help encryption header dump
+  usage: rbd encryption header dump [--pool <pool>] [--namespace <namespace>] 
+                                    [--image <image>] 
+                                    <image-spec> <dump-file> 
+  
+  Write the LUKS header of an image to a file.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <dump-file>          path of the file to write the LUKS header to, readable
+                         by its owner only
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+  
+  rbd help encryption header restore
+  usage: rbd encryption header restore [--pool <pool>] [--namespace <namespace>] 
+                                       [--image <image>] 
+                                       <image-spec> <dump-file> 
+  
+  Write a LUKS header dump back to an image.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <dump-file>          path of the file written by encryption header dump
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
   
   rbd help encryption keyslot add
   usage: rbd encryption keyslot add
