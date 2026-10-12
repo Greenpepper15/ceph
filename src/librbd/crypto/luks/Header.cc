@@ -67,15 +67,14 @@ int Header::init() {
                  << dendl;
     return -errno;
   }
-  std::string path =
-          "/proc/" + std::to_string(getpid()) + "/fd/" + std::to_string(m_fd);
+  m_path = "/proc/" + std::to_string(getpid()) + "/fd/" + std::to_string(m_fd);
 
   if (m_cct->_conf->subsys.should_gather<dout_subsys, 30>()) {
     crypt_set_debug_level(CRYPT_DEBUG_ALL);
   }
 
   // init libcryptsetup handle
-  auto r = crypt_init(&m_cd, path.c_str());
+  auto r = crypt_init(&m_cd, m_path.c_str());
   if (r != 0) {
     lderr(m_cct) << "crypt_init failed: " << cpp_strerror(r) << dendl;
     return r;
@@ -394,6 +393,26 @@ uint64_t Header::get_data_offset() {
 int Header::get_volume_key_size() {
   ceph_assert(m_cd != nullptr);
   return crypt_get_volume_key_size(m_cd);
+}
+
+// writes the header in backup_path over the one in the anonymous file,
+// with libcryptsetup's own checks: the backup must be a valid header, and
+// while the current one still loads its data offset must match
+int Header::restore(const char* backup_path) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = extend_to_device_size();
+  if (r < 0) {
+    return r;
+  }
+
+  r = crypt_header_restore(m_cd, nullptr, backup_path);
+  if (r < 0) {
+    lderr(m_cct) << "crypt_header_restore failed: " << cpp_strerror(r)
+                 << dendl;
+  }
+
+  return r;
 }
 
 const char* Header::get_cipher() {

@@ -54,6 +54,10 @@ public:
     int get_sector_size();
     uint64_t get_data_offset();
     int get_volume_key_size();
+
+    // the anonymous file's path, for libcryptsetup calls that take one
+    const std::string& get_path() const { return m_path; }
+    int restore(const char* backup_path);
     const char* get_cipher();
     const char* get_cipher_mode();
     const char* get_format_name();
@@ -66,6 +70,7 @@ private:
 
     CephContext* m_cct;
     int m_fd;
+    std::string m_path;
     struct crypt_device *m_cd;
 };
 
