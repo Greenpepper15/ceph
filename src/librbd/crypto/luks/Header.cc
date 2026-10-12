@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include "common/dout.h"
+#include "common/safe_io.h"
 #include "common/errno.h"
 
 #define dout_subsys ceph_subsys_rbd
@@ -118,6 +119,23 @@ ssize_t Header::read(ceph::bufferlist* bl) {
   return r;
 }
 
+ssize_t Header::read(ceph::bufferlist* bl, uint64_t offset,
+                     uint64_t length) {
+  ceph_assert(m_fd != -1);
+
+  ceph::bufferptr bp(ceph::buffer::create(length));
+  auto r = safe_pread(m_fd, bp.c_str(), length, offset);
+  if (r < 0) {
+    lderr(m_cct) << "error reading header: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  bp.set_length(r);
+  bl->append(std::move(bp));
+  ldout(m_cct, 20) << "offset = " << offset << ", read size = " << r << dendl;
+  return r;
+}
+
 int Header::format(const char* type, const char* alg, const char* key,
                    size_t key_size, const char* cipher_mode,
                    uint32_t sector_size, uint32_t data_alignment,
@@ -192,18 +210,24 @@ int Header::add_keyslot(const char* passphrase, size_t passphrase_size) {
   return 0;
 }
 
-int Header::load(const char* type) {
-  ceph_assert(m_cd != nullptr);
-
-  // libcryptsetup checks if device size matches the header and keyslots size
-  // in LUKS2, 2 X 4MB header + 128MB keyslots
-  if (ftruncate(m_fd, 136 * 1024 * 1024) != 0) {
+int Header::extend_to_device_size() {
+  if (ftruncate(m_fd, ANONYMOUS_FILE_SIZE) != 0) {
     lderr(m_cct) << "failed to truncate anonymous file: "
                  << cpp_strerror(-errno) << dendl;
     return -errno;
   }
+  return 0;
+}
 
-  auto r = crypt_load(m_cd, type, NULL);
+int Header::load(const char* type) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = extend_to_device_size();
+  if (r < 0) {
+    return r;
+  }
+
+  r = crypt_load(m_cd, type, NULL);
   if (r != 0) {
     ldout(m_cct, 20) << "crypt_load failed: " << cpp_strerror(r) << dendl;
     return r;
@@ -231,6 +255,84 @@ int Header::read_volume_key(const char* passphrase, size_t passphrase_size,
   return 0;
 }
 
+int Header::unlock_keyslot(int keyslot, const char* passphrase,
+                           size_t passphrase_size, char* volume_key,
+                           size_t* volume_key_size) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_volume_key_get(m_cd, keyslot, volume_key, volume_key_size,
+                                passphrase, passphrase_size);
+  if (r < 0) {
+    ldout(m_cct, 20) << "crypt_volume_key_get failed: " << cpp_strerror(r)
+                     << dendl;
+  }
+
+  return r;
+}
+
+int Header::add_keyslot_by_volume_key(int keyslot, const char* volume_key,
+                                      size_t volume_key_size,
+                                      const char* passphrase,
+                                      size_t passphrase_size) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_keyslot_add_by_volume_key(m_cd, keyslot, volume_key,
+                                           volume_key_size, passphrase,
+                                           passphrase_size);
+  if (r < 0) {
+    lderr(m_cct) << "crypt_keyslot_add_by_volume_key failed: "
+                 << cpp_strerror(r) << dendl;
+  }
+
+  return r;
+}
+
+int Header::set_pbkdf(const struct crypt_pbkdf_type* pbkdf) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_set_pbkdf_type(m_cd, pbkdf);
+  if (r < 0) {
+    lderr(m_cct) << "crypt_set_pbkdf_type failed: " << cpp_strerror(r)
+                 << dendl;
+  }
+
+  return r;
+}
+
+int Header::destroy_keyslot(int keyslot) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_keyslot_destroy(m_cd, keyslot);
+  if (r < 0) {
+    lderr(m_cct) << "crypt_keyslot_destroy failed: " << cpp_strerror(r)
+                 << dendl;
+  }
+
+  return r;
+}
+
+crypt_keyslot_info Header::get_keyslot_status(int keyslot) {
+  ceph_assert(m_cd != nullptr);
+  return crypt_keyslot_status(m_cd, keyslot);
+}
+
+int Header::get_keyslot_max() {
+  ceph_assert(m_cd != nullptr);
+  return crypt_keyslot_max(crypt_get_type(m_cd));
+}
+
+int Header::get_keyslot_pbkdf(int keyslot, struct crypt_pbkdf_type* pbkdf) {
+  ceph_assert(m_cd != nullptr);
+
+  auto r = crypt_keyslot_get_pbkdf(m_cd, keyslot, pbkdf);
+  if (r < 0) {
+    lderr(m_cct) << "crypt_keyslot_get_pbkdf failed: " << cpp_strerror(r)
+                 << dendl;
+  }
+
+  return r;
+}
+
 int Header::get_sector_size() {
   ceph_assert(m_cd != nullptr);
   return crypt_get_sector_size(m_cd);
@@ -239,6 +341,11 @@ int Header::get_sector_size() {
 uint64_t Header::get_data_offset() {
   ceph_assert(m_cd != nullptr);
   return crypt_get_data_offset(m_cd) << 9;
+}
+
+int Header::get_volume_key_size() {
+  ceph_assert(m_cd != nullptr);
+  return crypt_get_volume_key_size(m_cd);
 }
 
 const char* Header::get_cipher() {
