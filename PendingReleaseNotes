@@ -136,6 +136,14 @@
   A stale ``rwl`` in ceph.conf or the Monitor config store is merely ignored,
   and such an image simply runs without a cache. Note that ``ceph config set
   ... rwl`` now fails, which may break automation.
+* RBD: The passphrases of a LUKS-encrypted image can now be rotated through
+  librbd. The new ``rbd_encryption_luks_volume_key_get()``,
+  ``rbd_encryption_luks_keyslot_add()`` and
+  ``rbd_encryption_luks_keyslot_remove()`` calls, with their C++ and Python
+  counterparts, read the volume key out of the header and add and remove
+  keyslots. The caller holds the volume key for a rotation and repairs a
+  failed step with these primitives. The volume key does not change, so
+  clients that have the image open are not affected.
 
 >=21.0.0
 * CephFS: The ``fs subvolumegroup create`` command now supports the

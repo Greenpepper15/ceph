@@ -1011,6 +1011,38 @@ int Image<I>::encryption_load(I* ictx, const encryption_spec_t *specs,
   return cond.wait();
 }
 
+template <typename I>
+int Image<I>::encryption_luks_volume_key_get(
+    I* ictx, const void* opts, size_t opts_size, bool c_api, size_t max_size,
+    std::string* volume_key, size_t* key_size, int* keyslot) {
+  C_SaferCond cond;
+  util::luks_volume_key_get(ictx, opts, opts_size, c_api, max_size,
+                            volume_key, key_size, keyslot, &cond);
+  return cond.wait();
+}
+
+template <typename I>
+int Image<I>::encryption_luks_keyslot_add(I* ictx, const void* opts,
+                                          size_t opts_size, bool c_api) {
+  int result_keyslot = -1;
+  C_SaferCond cond;
+  util::luks_keyslot_add(ictx, opts, opts_size, c_api, &result_keyslot,
+                         &cond);
+  int r = cond.wait();
+  if (r < 0) {
+    return r;
+  }
+  return result_keyslot;
+}
+
+template <typename I>
+int Image<I>::encryption_luks_keyslot_remove(I* ictx, const void* opts,
+                                             size_t opts_size, bool c_api) {
+  C_SaferCond cond;
+  util::luks_keyslot_remove(ictx, opts, opts_size, c_api, &cond);
+  return cond.wait();
+}
+
 } // namespace api
 } // namespace librbd
 

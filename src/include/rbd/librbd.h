@@ -52,6 +52,7 @@ extern "C" {
 #define LIBRBD_SUPPORTS_WRITE_ZEROES 1
 #define LIBRBD_SUPPORTS_ENCRYPTION 1
 #define LIBRBD_SUPPORTS_ENCRYPTION_LOAD2 1
+#define LIBRBD_SUPPORTS_ENCRYPTION_LUKS_KEYSLOTS 1
 #define LIBRBD_SUPPORTS_GROUP_SNAP_GET_INFO 1
 #define LIBRBD_SUPPORTS_DIFF_ITERATE3 1
 
@@ -450,6 +451,32 @@ typedef struct {
     const char* passphrase;
     size_t passphrase_size;
 } rbd_encryption_luks_format_options_t;
+
+typedef struct {
+    int keyslot;
+    const char* volume_key;     /* the key the data is encrypted with */
+    size_t volume_key_size;
+    const char* passphrase;     /* for the new keyslot */
+    size_t passphrase_size;
+    /* NULL: copy the KDF settings of the lowest keyslot in use */
+    const char* kdf;
+    const char* hash;
+    uint32_t kdf_iterations;
+    uint32_t kdf_memory_kb;
+    uint32_t kdf_threads;
+} rbd_encryption_luks_keyslot_add_options_t;
+
+typedef struct {
+    int keyslot;
+} rbd_encryption_luks_keyslot_remove_options_t;
+
+typedef struct {
+    const char* passphrase;     /* unlocks a keyslot */
+    size_t passphrase_size;
+} rbd_encryption_luks_volume_key_get_options_t;
+
+/* let librbd pick the first free LUKS keyslot */
+#define RBD_ENCRYPTION_LUKS_ANY_KEYSLOT (-1)
 
 CEPH_RBD_API void rbd_image_options_create(rbd_image_options_t* opts);
 CEPH_RBD_API void rbd_image_options_destroy(rbd_image_options_t opts);
@@ -927,6 +954,77 @@ CEPH_RBD_API int rbd_encryption_load(rbd_image_t image,
 CEPH_RBD_API int rbd_encryption_load2(rbd_image_t image,
                                       const rbd_encryption_spec_t *specs,
                                       size_t spec_count);
+
+/*
+ * LUKS keyslot primitives for passphrase rotation, acting on the image's
+ * header with or without loaded encryption. They are as thin as the
+ * libcryptsetup calls behind them: a call returns once its changes to the
+ * header are flushed, verifies nothing afterwards and orders nothing, so
+ * a failed call may have changed the header in part. The caller holds the
+ * volume key for a rotation and repairs any state with the primitives:
+ *
+ *   1. rbd_encryption_luks_volume_key_get(), the key kept, wrapped, until
+ *      the end;
+ *   2. rbd_encryption_luks_keyslot_add() with the key and the new
+ *      passphrase, then proven the caller's way: a load with the new
+ *      passphrase, or rbd_encryption_luks_volume_key_get() with it;
+ *   3. rbd_encryption_luks_keyslot_remove() of the old keyslot, then the
+ *      key deleted.
+ *
+ * What a write-back guarantees: the changed 4 KiB ranges of the header are
+ * written one at a time in ascending offset order, each acknowledged by
+ * the image's I/O path before the next is issued, then flushed once;
+ * nothing is verified afterwards. The acknowledgement may come from a
+ * cache, so only the flush makes the writes durable, and a crash before it
+ * can leave any subset of them on the image. Three partial states follow:
+ * metadata that lists a keyslot whose key material did not land, which
+ * does not open and which remove plus add repair; key material of a
+ * keyslot the metadata no longer lists, which is unusable without the salt
+ * and KDF settings that lived in that metadata; and, when both LUKS2
+ * metadata copies or the LUKS1 record were hit, a header that no longer
+ * loads, which only a copy of the header taken beforehand brings back.
+ * The volume key never changes; it opens the image without any
+ * passphrase, so the caller protects it like the passphrases. Callers
+ * must serialize header updates. Every *_size argument must be sizeof()
+ * of its struct; new fields would come with new calls.
+ */
+
+/*
+ * Get the volume key, the key the data is encrypted with, through the
+ * keyslot that passphrase unlocks, into a caller buffer of *volume_key_size
+ * bytes.  On success *volume_key_size is the key's size and *keyslot, if
+ * not NULL, the keyslot that opened.  If the buffer is too small, -ERANGE
+ * is returned and *volume_key_size is the size needed, without a key
+ * derivation; volume_key may be NULL only with *volume_key_size 0.  A
+ * passphrase that unlocks no keyslot is -EPERM.  The key opens the image
+ * without any passphrase: the caller protects it like the passphrases and
+ * keeps it only as long as a rotation needs it.
+ */
+CEPH_RBD_API int rbd_encryption_luks_volume_key_get(
+    rbd_image_t image,
+    const rbd_encryption_luks_volume_key_get_options_t *opts,
+    size_t opts_size, char *volume_key, size_t *volume_key_size,
+    int *keyslot);
+/*
+ * Add a keyslot that stores volume_key and unlocks with passphrase.  Can
+ * only be called on already formatted LUKS images.  keyslot may be
+ * RBD_ENCRYPTION_LUKS_ANY_KEYSLOT; an explicit keyslot in use is -EEXIST,
+ * no free keyslot -ENOSPC, a volume key that does not match the data
+ * -EPERM.  The KDF fields are all unset, or kdf names the algorithm and
+ * the others are used as given; unset, the settings of the lowest keyslot
+ * in use are copied, and with no keyslot in use they are required
+ * (-EINVAL).  Returns the slot used, or a negative error code.
+ */
+CEPH_RBD_API int rbd_encryption_luks_keyslot_add(
+    rbd_image_t image, const rbd_encryption_luks_keyslot_add_options_t *opts,
+    size_t opts_size);
+/*
+ * Remove a keyslot.  A keyslot not in use is -ENOENT; the last keyslot
+ * bound to the data cannot be removed (-EBUSY).
+ */
+CEPH_RBD_API int rbd_encryption_luks_keyslot_remove(
+    rbd_image_t image, const rbd_encryption_luks_keyslot_remove_options_t *opts,
+    size_t opts_size);
 
 /* snapshots */
 CEPH_RBD_API int rbd_snap_list(rbd_image_t image, rbd_snap_info_t *snaps,
