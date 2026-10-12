@@ -9,6 +9,7 @@
 #include "librbd/ImageCtx.h"
 #include "librbd/crypto/CryptoInterface.h"
 #include "librbd/crypto/luks/Header.h"
+#include "librbd/crypto/luks/ReadHeaderRequest.h"
 
 namespace librbd {
 
@@ -16,11 +17,6 @@ class ImageCtx;
 
 namespace crypto {
 namespace luks {
-
-// max header size in LUKS1/2 (excl. keyslots) is 4MB
-const uint64_t MAXIMUM_HEADER_SIZE = 4 * 1024 * 1024;
-// default header size in LUKS2 2 X 16KB + 1 X 256KB keyslot
-const uint64_t DEFAULT_INITIAL_READ_SIZE = 288 * 1024;
 
 template <typename I>
 class LoadRequest {
@@ -48,15 +44,12 @@ private:
     encryption_format_t m_format;
     std::string_view m_passphrase;
     Context* m_on_finish;
-    ceph::bufferlist m_bl;
     std::unique_ptr<CryptoInterface>* m_result_crypto;
     std::string* m_detected_format_name;
     uint64_t m_initial_read_size;
     Header m_header;
     uint64_t m_offset;
 
-    void read(uint64_t end_offset, Context* on_finish);
-    bool handle_read(int r);
     void handle_read_header(int r);
     void handle_read_keyslots(int r);
     void read_volume_key();

@@ -15,6 +15,7 @@ inline ImageCtx *get_image_ctx(MockImageCtx *image_ctx) {
 } // namespace util
 } // namespace librbd
 
+#include "librbd/crypto/luks/ReadHeaderRequest.cc"
 #include "librbd/crypto/luks/LoadRequest.cc"
 
 namespace librbd {
