@@ -58,6 +58,9 @@ set(rbd_srcs
 if(WIN32)
   list(APPEND rbd_srcs ../../common/win32/code_page.rc)
 endif()
+if(LINUX AND HAVE_LIBCRYPTSETUP)
+  list(APPEND rbd_srcs action/EncryptionLuks.cc)
+endif()
 
 add_executable(rbd ${rbd_srcs}
   $<TARGET_OBJECTS:common_texttable_obj>)
@@ -72,6 +75,10 @@ target_link_libraries(rbd
   librados
   ceph-common global
   ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
+if(LINUX AND HAVE_LIBCRYPTSETUP)
+  target_include_directories(rbd PRIVATE ${LIBCRYPTSETUP_INCLUDE_DIR})
+  target_link_libraries(rbd ${LIBCRYPTSETUP_LIBRARIES})
+endif()
 if(CURSES_FOUND)
   target_compile_definitions(rbd PRIVATE HAVE_CURSES)
   target_link_libraries(rbd ${CURSES_LIBRARIES})
