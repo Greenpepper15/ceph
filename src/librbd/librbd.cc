@@ -2275,6 +2275,33 @@ namespace librbd {
     return librbd::api::Image<>::encryption_luks_header_restore(ictx, dump);
   }
 
+  int Image::encryption_luks_header_open(encryption_luks_header_t *header,
+                                         int *fd)
+  {
+    ImageCtx *ictx = (ImageCtx *)ctx;
+    if (header == nullptr || fd == nullptr) {
+      return -EINVAL;
+    }
+    return librbd::api::Image<>::encryption_luks_header_open(ictx, header,
+                                                             fd);
+  }
+
+  int Image::encryption_luks_header_commit(encryption_luks_header_t header)
+  {
+    if (header == nullptr) {
+      return -EINVAL;
+    }
+    return librbd::api::Image<>::encryption_luks_header_commit(header);
+  }
+
+  int Image::encryption_luks_header_close(encryption_luks_header_t header)
+  {
+    if (header == nullptr) {
+      return -EINVAL;
+    }
+    return librbd::api::Image<>::encryption_luks_header_close(header);
+  }
+
   int Image::flatten()
   {
     ImageCtx *ictx = (ImageCtx *)ctx;
@@ -4800,6 +4827,34 @@ extern "C" int rbd_encryption_luks_header_restore(rbd_image_t image,
   }
   return librbd::api::Image<>::encryption_luks_header_restore(
           ictx, std::string_view(dump, dump_size));
+}
+
+extern "C" int rbd_encryption_luks_header_open(
+    rbd_image_t image, rbd_encryption_luks_header_t *header, int *fd)
+{
+  librbd::ImageCtx *ictx = (librbd::ImageCtx *)image;
+  if (header == nullptr || fd == nullptr) {
+    return -EINVAL;
+  }
+  return librbd::api::Image<>::encryption_luks_header_open(ictx, header, fd);
+}
+
+extern "C" int rbd_encryption_luks_header_commit(
+    rbd_encryption_luks_header_t header)
+{
+  if (header == nullptr) {
+    return -EINVAL;
+  }
+  return librbd::api::Image<>::encryption_luks_header_commit(header);
+}
+
+extern "C" int rbd_encryption_luks_header_close(
+    rbd_encryption_luks_header_t header)
+{
+  if (header == nullptr) {
+    return -EINVAL;
+  }
+  return librbd::api::Image<>::encryption_luks_header_close(header);
 }
 
 extern "C" int rbd_encryption_luks_keyslot_list_cleanup(

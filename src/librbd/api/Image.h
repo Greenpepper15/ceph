@@ -90,6 +90,10 @@ struct Image {
                                          size_t *dump_size);
   static int encryption_luks_header_restore(ImageCtxT *ictx,
                                             std::string_view dump);
+  static int encryption_luks_header_open(ImageCtxT *ictx, void **header,
+                                         int *fd);
+  static int encryption_luks_header_commit(void *header);
+  static int encryption_luks_header_close(void *header);
 };
 
 } // namespace api

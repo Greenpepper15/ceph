@@ -1067,6 +1067,32 @@ int Image<I>::encryption_luks_header_restore(I* ictx, std::string_view dump) {
   return cond.wait();
 }
 
+template <typename I>
+int Image<I>::encryption_luks_header_open(I* ictx, void** header, int* fd) {
+  *header = nullptr;
+  C_SaferCond cond;
+  util::luks_header_open(ictx, header, fd, &cond);
+  int r = cond.wait();
+  if (r < 0 && *header != nullptr) {
+    util::luks_header_close<I>(*header);
+    *header = nullptr;
+  }
+  return r;
+}
+
+template <typename I>
+int Image<I>::encryption_luks_header_commit(void* header) {
+  C_SaferCond cond;
+  util::luks_header_commit<I>(header, &cond);
+  return cond.wait();
+}
+
+template <typename I>
+int Image<I>::encryption_luks_header_close(void* header) {
+  util::luks_header_close<I>(header);
+  return 0;
+}
+
 } // namespace api
 } // namespace librbd
 

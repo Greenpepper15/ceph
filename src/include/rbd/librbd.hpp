@@ -240,6 +240,7 @@ namespace librbd {
   typedef rbd_encryption_algorithm_t encryption_algorithm_t;
   typedef rbd_encryption_options_t encryption_options_t;
   typedef rbd_encryption_spec_t encryption_spec_t;
+  typedef rbd_encryption_luks_header_t encryption_luks_header_t;
 
   typedef struct {
     encryption_algorithm_t alg;
@@ -694,6 +695,9 @@ public:
       size_t keyslot_info_size);
   int encryption_luks_header_dump(std::string *dump);
   int encryption_luks_header_restore(const std::string &dump);
+  int encryption_luks_header_open(encryption_luks_header_t *header, int *fd);
+  int encryption_luks_header_commit(encryption_luks_header_t header);
+  int encryption_luks_header_close(encryption_luks_header_t header);
 
   /* striping */
   uint64_t get_stripe_unit() const;

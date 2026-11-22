@@ -43,6 +43,15 @@ void luks_header_dump(ImageCtxT* ictx, size_t max_size, std::string* dump,
 template <typename ImageCtxT = librbd::ImageCtx>
 void luks_header_restore(ImageCtxT* ictx, std::string_view dump,
                          Context* on_finish);
+// the header session behind rbd_encryption_luks_header_open(): *header is
+// set before on_finish runs and is closed by the caller on any outcome
+template <typename ImageCtxT = librbd::ImageCtx>
+void luks_header_open(ImageCtxT* ictx, void** header, int* fd,
+                      Context* on_finish);
+template <typename ImageCtxT = librbd::ImageCtx>
+void luks_header_commit(void* header, Context* on_finish);
+template <typename ImageCtxT = librbd::ImageCtx>
+void luks_header_close(void* header);
 
 } // namespace util
 } // namespace api

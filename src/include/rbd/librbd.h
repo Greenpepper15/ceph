@@ -1081,6 +1081,35 @@ CEPH_RBD_API int rbd_encryption_luks_header_restore(rbd_image_t image,
                                                     const char *dump,
                                                     size_t dump_size);
 
+/*
+ * PoC of a header session (option 1.5), the generic counterpart of the
+ * keyslot calls above.
+ *
+ * Stage a copy of the image's LUKS header and return a file descriptor
+ * that shares the staged file: what libcryptsetup or cryptsetup changes on
+ * /proc/self/fd/<fd> is what commit writes back.  The copy carries the
+ * LUKS magic even on a clone and holds every keyslot in use, so it is as
+ * sensitive as a dump.  The caller closes the fd, and closes the session
+ * before the image.
+ */
+typedef void *rbd_encryption_luks_header_t;
+CEPH_RBD_API int rbd_encryption_luks_header_open(
+    rbd_image_t image, rbd_encryption_luks_header_t *header, int *fd);
+/*
+ * Write the staged header back: the 4 KiB ranges of the header area that
+ * differ from the stored bytes, in ascending order, then one flush;
+ * nothing verified.  The header area ends at the data offset, which must
+ * not have changed, and data beyond it in the staged file is an error
+ * (-EINVAL).  On a clone the RBD clone magic is re-applied.  A read-only
+ * handle or a snapshot is -EROFS.  A session can commit more than once.
+ * Callers must serialize header updates.
+ */
+CEPH_RBD_API int rbd_encryption_luks_header_commit(
+    rbd_encryption_luks_header_t header);
+/* Discard the staged copy. */
+CEPH_RBD_API int rbd_encryption_luks_header_close(
+    rbd_encryption_luks_header_t header);
+
 /* snapshots */
 CEPH_RBD_API int rbd_snap_list(rbd_image_t image, rbd_snap_info_t *snaps,
                                int *max_snaps);
