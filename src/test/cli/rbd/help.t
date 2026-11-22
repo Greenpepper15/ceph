@@ -46,6 +46,12 @@
       encryption keyslot list (... ls)  List the LUKS keyslots in use.
       encryption keyslot remove (... rm)
                                         Remove a LUKS keyslot.
+      encryption luksAddKey             Add a passphrase to a LUKS image.
+      encryption luksChangeKey          Replace a passphrase of a LUKS image.
+      encryption luksDump               Print the LUKS header of an image.
+      encryption luksKillSlot           Remove a keyslot of a LUKS image.
+      encryption luksOpen               Check a passphrase against the LUKS
+                                        header of an image.
       encryption volume-key get         Write the volume key of a LUKS image to a
                                         file.
       export                            Export image to file.
@@ -183,7 +189,7 @@
     -k [ --keyring ] arg                path to keyring
   
   See 'rbd help <command>' for help on a specific command.
-  $ rbd help | grep '^    [a-z]' | sed 's/^    \([a-z -]*[a-z]\).*/\1/g' | while read -r line; do echo rbd help $line ; rbd help $line; done
+  $ rbd help | grep '^    [a-z]' | sed 's/^    \([a-z][a-zA-Z-]*\( [a-z][a-zA-Z-]*\)*\).*/\1/g' | while read -r line; do echo rbd help $line ; rbd help $line; done
   rbd help bench
   usage: rbd bench [--pool <pool>] [--namespace <namespace>] [--image <image>] 
                    [--io-size <io-size>] [--io-threads <io-threads>] 
@@ -894,6 +900,103 @@
     --namespace arg      namespace name
     --image arg          image name
     --keyslot arg        LUKS keyslot to remove (required)
+  
+  rbd help encryption luksAddKey
+  usage: rbd encryption luksAddKey [--pool <pool>] [--namespace <namespace>] 
+                                   [--image <image>] [--key-file <key-file>] 
+                                   [--key-slot <key-slot>] 
+                                   <image-spec> <new-key-file> 
+  
+  Add a passphrase to a LUKS image.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <new-key-file>       path of file containing the new passphrase
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+    --key-file arg       path of file containing a passphrase in use
+    --key-slot arg       keyslot for the new passphrase [default: first free
+                         keyslot]
+  
+  rbd help encryption luksChangeKey
+  usage: rbd encryption luksChangeKey [--pool <pool>] [--namespace <namespace>] 
+                                      [--image <image>] [--key-file <key-file>] 
+                                      [--key-slot <key-slot>] 
+                                      <image-spec> <new-key-file> 
+  
+  Replace a passphrase of a LUKS image.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <new-key-file>       path of file containing the new passphrase
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+    --key-file arg       path of file containing the passphrase to replace
+    --key-slot arg       keyslot to change [default: the one the passphrase
+                         unlocks]
+  
+  rbd help encryption luksDump
+  usage: rbd encryption luksDump [--pool <pool>] [--namespace <namespace>] 
+                                 [--image <image>] 
+                                 <image-spec> 
+  
+  Print the LUKS header of an image.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+  
+  rbd help encryption luksKillSlot
+  usage: rbd encryption luksKillSlot [--pool <pool>] [--namespace <namespace>] 
+                                     [--image <image>] [--key-file <key-file>] 
+                                     <image-spec> <key-slot> 
+  
+  Remove a keyslot of a LUKS image.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+    <key-slot>           keyslot to remove
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+    --key-file arg       path of file containing a passphrase of another keyslot
+  
+  rbd help encryption luksOpen
+  usage: rbd encryption luksOpen [--pool <pool>] [--namespace <namespace>] 
+                                 [--image <image>] [--key-file <key-file>] 
+                                 [--key-slot <key-slot>] [--test-passphrase] 
+                                 <image-spec> 
+  
+  Check a passphrase against the LUKS header of an image.
+  
+  Positional arguments
+    <image-spec>         image specification
+                         (example: [<pool-name>/[<namespace>/]]<image-name>)
+  
+  Optional arguments
+    -p [ --pool ] arg    pool name
+    --namespace arg      namespace name
+    --image arg          image name
+    --key-file arg       path of file containing the passphrase
+    --key-slot arg       keyslot to try [default: all]
+    --test-passphrase    only check that the passphrase unlocks a keyslot
+                         (required)
   
   rbd help encryption volume-key get
   usage: rbd encryption volume-key get [--pool <pool>] [--namespace <namespace>] 
