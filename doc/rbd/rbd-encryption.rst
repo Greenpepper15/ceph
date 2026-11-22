@@ -228,8 +228,46 @@ one place has to serialize them itself.
    formatted with its own encryption needs the passphrase of its parent
    snapshot until it is flattened.
 
-The same header changes can also be applied to the raw data of an image that
-is not a clone, using compatible tools such as cryptsetup.
+A passphrase can also be rotated without these commands, with cryptsetup on a
+device that shows the raw data of the image. Map the image without loading its
+encryption, add the new passphrase, prove it, wipe the keyslot of the old one
+and unmap:
+
+.. prompt:: bash #
+
+    rbd device map [-t nbd] {image-spec}
+    cryptsetup luksDump {device}
+    cryptsetup luksAddKey --key-file {passphrase-file} {device} {new-passphrase-file}
+    cryptsetup open --test-passphrase --key-file {new-passphrase-file} {device}
+    cryptsetup luksKillSlot --key-file {new-passphrase-file} {device} {n}
+    rbd device unmap [-t nbd] {device}
+
+``luksDump`` lists the keyslots in use with their key derivation settings.
+``luksAddKey`` unlocks a keyslot with the passphrase from `passphrase-file` and
+stores the volume key in a free one, protected by the passphrase from
+`new-passphrase-file`. ``open --test-passphrase`` unlocks with the new
+passphrase and maps nothing. ``luksKillSlot`` wipes keyslot `n`, the one that
+held the old passphrase. The volume key stays inside cryptsetup, and a client
+that has the image open with its encryption loaded keeps running.
+
+This way has limits of its own:
+
+* It needs root and the ``rbd`` or ``nbd`` kernel module on the host that runs
+  it.
+* It does not work on an image that had a parent when it was formatted. Such an
+  image is stored with the RBD clone magic in place of the LUKS magic, and
+  cryptsetup reports that the device is not a valid LUKS device. Flattening the
+  image with its encryption loaded puts the LUKS magic back.
+* The mapped device is a second client of the image. While another client,
+  such as a running virtual machine, holds the exclusive lock, each write of
+  cryptsetup takes the lock away and the next write of that client takes it
+  back, and the writes of both wait for each handover. With the kernel ``rbd``
+  module and the object map enabled, reads move the lock as well; with
+  ``-t nbd`` only writes do.
+* cryptsetup sets the key derivation cost of a new keyslot from a benchmark of
+  the host it runs on, so the cost to unlock the image can change with the
+  host that rotated. Its ``--pbkdf-memory``, ``--pbkdf-parallel`` and
+  ``--pbkdf-force-iterations`` options set the cost by hand.
 
 The LUKS header size can vary (up to 136MiB in LUKS2), but is usually up to
 16MiB, depending on the version of `libcryptsetup` installed. For optimal
