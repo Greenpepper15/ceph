@@ -269,8 +269,11 @@ void UpdateHeaderRequest<I>::write_next() {
 
   auto ctx = create_context_callback<
           UpdateHeaderRequest<I>, &UpdateHeaderRequest<I>::handle_write>(this);
-  auto aio_comp = io::AioCompletion::create_and_start(
-          ctx, librbd::util::get_image_ctx(m_image_ctx), io::AIO_TYPE_WRITE);
+  // not started here: the core layer marks the write as in flight, so a
+  // write that waits for the exclusive lock does not block a lock release
+  auto aio_comp = io::AioCompletion::create(ctx);
+  aio_comp->init_time(librbd::util::get_image_ctx(m_image_ctx),
+                      io::AIO_TYPE_WRITE);
 
   ceph::bufferlist write_bl = bl;
   ZTracer::Trace trace;
