@@ -215,6 +215,7 @@ if(LINUX AND HAVE_LIBCRYPTSETUP)
           crypto/luks/Header.cc
           crypto/luks/HeaderBackupRequest.cc
           crypto/luks/HeaderRestoreRequest.cc
+          crypto/luks/HeaderSession.cc
           crypto/luks/LoadRequest.cc
           crypto/luks/Magic.cc
           crypto/luks/ReadHeaderRequest.cc

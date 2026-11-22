@@ -415,6 +415,57 @@ int Header::restore(const char* backup_path) {
   return r;
 }
 
+int Header::dup_fd() {
+  ceph_assert(m_fd != -1);
+
+  int fd = dup(m_fd);
+  if (fd == -1) {
+    int r = -errno;
+    lderr(m_cct) << "error duplicating the anonymous file: "
+                 << cpp_strerror(r) << dendl;
+    return r;
+  }
+  return fd;
+}
+
+int Header::reload() {
+  ceph_assert(m_fd != -1);
+
+  if (m_cd != nullptr) {
+    crypt_free(m_cd);
+    m_cd = nullptr;
+  }
+  auto r = crypt_init(&m_cd, m_path.c_str());
+  if (r != 0) {
+    lderr(m_cct) << "crypt_init failed: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+  crypt_set_log_callback(m_cd, &libcryptsetup_log_wrapper, this);
+
+  r = crypt_load(m_cd, CRYPT_LUKS, NULL);
+  if (r != 0) {
+    lderr(m_cct) << "crypt_load failed: " << cpp_strerror(r) << dendl;
+  }
+  return r;
+}
+
+int Header::has_data_from(uint64_t offset) {
+  ceph_assert(m_fd != -1);
+
+  // the anonymous file is sparse beyond what was fed, so any data found
+  // there was written by the caller
+  if (lseek(m_fd, offset, SEEK_DATA) != -1) {
+    return 1;
+  }
+  if (errno == ENXIO) {
+    return 0;
+  }
+  int r = -errno;
+  lderr(m_cct) << "error seeking in the anonymous file: " << cpp_strerror(r)
+               << dendl;
+  return r;
+}
+
 const char* Header::get_cipher() {
   ceph_assert(m_cd != nullptr);
   return crypt_get_cipher(m_cd);

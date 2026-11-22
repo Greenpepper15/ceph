@@ -58,6 +58,14 @@ public:
     // the anonymous file's path, for libcryptsetup calls that take one
     const std::string& get_path() const { return m_path; }
     int restore(const char* backup_path);
+
+    // for a header session: a duplicate of the anonymous file's descriptor
+    // that the caller owns, a fresh parse after the file was changed
+    // through another libcryptsetup context, and whether the file holds
+    // data at or after an offset
+    int dup_fd();
+    int reload();
+    int has_data_from(uint64_t offset);
     const char* get_cipher();
     const char* get_cipher_mode();
     const char* get_format_name();
