@@ -100,10 +100,28 @@ public:
     crypt_free(m_cd);
     m_cd = nullptr;
 
-    int r = m_image.encryption_luks_header_commit(m_header);
+    // Keep the exclusive lock while the header is written. Other clients
+    // then wait for the release instead of taking the lock between two
+    // writes.
+    int r = m_image.lock_acquire(RBD_LOCK_MODE_EXCLUSIVE_TRANSIENT);
+    bool locked = (r == 0);
+    if (r < 0 && r != -EINVAL) {  // -EINVAL: no exclusive-lock feature
+      std::cerr << "rbd: unable to take the exclusive lock: "
+                << cpp_strerror(r) << std::endl;
+      return r;
+    }
+
+    r = m_image.encryption_luks_header_commit(m_header);
     if (r < 0) {
       std::cerr << "rbd: unable to write the LUKS header back: "
                 << cpp_strerror(r) << std::endl;
+    }
+    if (locked) {
+      int lr = m_image.lock_release();
+      if (lr < 0) {
+        std::cerr << "rbd: unable to release the exclusive lock: "
+                  << cpp_strerror(lr) << std::endl;
+      }
     }
     return r;
   }
