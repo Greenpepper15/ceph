@@ -70,9 +70,11 @@ void ReadHeaderRequest<I>::read(uint64_t end_offset, Context* on_finish) {
                               << end_offset << " area=" << m_area << dendl;
 
   auto length = end_offset - m_offset;
-  auto aio_comp = io::AioCompletion::create_and_start(
-          on_finish, librbd::util::get_image_ctx(m_image_ctx),
-          io::AIO_TYPE_READ);
+  // not started here: the core layer marks the read as in flight, so a
+  // read that waits for the exclusive lock does not block a lock release
+  auto aio_comp = io::AioCompletion::create(on_finish);
+  aio_comp->init_time(librbd::util::get_image_ctx(m_image_ctx),
+                      io::AIO_TYPE_READ);
   ZTracer::Trace trace;
   auto req = io::ImageDispatchSpec::create_read(
           *m_image_ctx, io::IMAGE_DISPATCH_LAYER_API_START, aio_comp,

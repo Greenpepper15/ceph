@@ -64,8 +64,11 @@ void HeaderRestoreRequest<I>::send() {
   auto ctx = create_context_callback<
           HeaderRestoreRequest<I>,
           &HeaderRestoreRequest<I>::handle_read_image>(this);
-  auto aio_comp = io::AioCompletion::create_and_start(
-          ctx, librbd::util::get_image_ctx(m_image_ctx), io::AIO_TYPE_READ);
+  // not started here: the core layer marks the read as in flight, so a
+  // read that waits for the exclusive lock does not block a lock release
+  auto aio_comp = io::AioCompletion::create(ctx);
+  aio_comp->init_time(librbd::util::get_image_ctx(m_image_ctx),
+                      io::AIO_TYPE_READ);
   ZTracer::Trace trace;
   auto req = io::ImageDispatchSpec::create_read(
           *m_image_ctx, io::IMAGE_DISPATCH_LAYER_API_START, aio_comp,
