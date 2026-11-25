@@ -240,6 +240,7 @@ namespace librbd {
   typedef rbd_encryption_algorithm_t encryption_algorithm_t;
   typedef rbd_encryption_options_t encryption_options_t;
   typedef rbd_encryption_spec_t encryption_spec_t;
+  typedef rbd_encryption_luks_header_t encryption_luks_header_t;
 
   typedef struct {
     encryption_algorithm_t alg;
@@ -254,6 +255,38 @@ namespace librbd {
   typedef struct {
     std::string passphrase;
   } encryption_luks_format_options_t;
+
+  // default member initializers need a tag name for the typedef's linkage
+  typedef struct encryption_luks_keyslot_add_options_t {
+    int keyslot = RBD_ENCRYPTION_LUKS_ANY_KEYSLOT;
+    std::string volume_key;     // the key the data is encrypted with
+    std::string passphrase;     // for the new keyslot
+    // empty: copy the KDF settings of the lowest keyslot in use
+    std::string kdf;
+    std::string hash;
+    uint32_t kdf_iterations = 0;
+    uint32_t kdf_memory_kb = 0;
+    uint32_t kdf_threads = 0;
+  } encryption_luks_keyslot_add_options_t;
+
+  typedef struct {
+    int keyslot;
+  } encryption_luks_keyslot_remove_options_t;
+
+  typedef struct {
+    std::string passphrase;     // unlocks a keyslot
+  } encryption_luks_volume_key_get_options_t;
+
+  typedef struct {
+    int keyslot;
+    bool last;
+    size_t key_size;
+    std::string kdf;
+    std::string hash;
+    uint32_t kdf_iterations;
+    uint32_t kdf_memory_kb;
+    uint32_t kdf_threads;
+  } encryption_luks_keyslot_info_t;
 
 class CEPH_RBD_API RBD
 {
@@ -650,6 +683,21 @@ public:
   int encryption_load(encryption_format_t format, encryption_options_t opts,
                       size_t opts_size);
   int encryption_load2(const encryption_spec_t *specs, size_t spec_count);
+  int encryption_luks_volume_key_get(
+      const encryption_luks_volume_key_get_options_t *opts, size_t opts_size,
+      std::string *volume_key, int *keyslot);
+  int encryption_luks_keyslot_add(
+      const encryption_luks_keyslot_add_options_t *opts, size_t opts_size);
+  int encryption_luks_keyslot_remove(
+      const encryption_luks_keyslot_remove_options_t *opts, size_t opts_size);
+  int encryption_luks_keyslot_list(
+      std::vector<encryption_luks_keyslot_info_t> *keyslots,
+      size_t keyslot_info_size);
+  int encryption_luks_header_dump(std::string *dump);
+  int encryption_luks_header_restore(const std::string &dump);
+  int encryption_luks_header_open(encryption_luks_header_t *header, int *fd);
+  int encryption_luks_header_commit(encryption_luks_header_t header);
+  int encryption_luks_header_close(encryption_luks_header_t header);
 
   /* striping */
   uint64_t get_stripe_unit() const;

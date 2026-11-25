@@ -75,6 +75,25 @@ struct Image {
                                bool c_api);
   static int encryption_load(ImageCtxT *ictx, const encryption_spec_t *specs,
                              size_t spec_count, bool c_api);
+  static int encryption_luks_volume_key_get(
+      ImageCtxT *ictx, const void *opts, size_t opts_size, bool c_api,
+      size_t max_size, std::string *volume_key, size_t *key_size,
+      int *keyslot);
+  static int encryption_luks_keyslot_add(ImageCtxT *ictx, const void *opts,
+                                         size_t opts_size, bool c_api);
+  static int encryption_luks_keyslot_remove(ImageCtxT *ictx, const void *opts,
+                                            size_t opts_size, bool c_api);
+  static int encryption_luks_keyslot_list(
+      ImageCtxT *ictx, std::vector<encryption_luks_keyslot_info_t> *keyslots);
+  static int encryption_luks_header_dump(ImageCtxT *ictx, size_t max_size,
+                                         std::string *dump,
+                                         size_t *dump_size);
+  static int encryption_luks_header_restore(ImageCtxT *ictx,
+                                            std::string_view dump);
+  static int encryption_luks_header_open(ImageCtxT *ictx, void **header,
+                                         int *fd);
+  static int encryption_luks_header_commit(void *header);
+  static int encryption_luks_header_close(void *header);
 };
 
 } // namespace api
